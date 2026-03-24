@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "browser-agent-foundation"
+version = "0.1.0"
+description = "Foundation for an LLM-driven browser agent with typed runtime contracts and safety-first automation."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "playwright",
+    "pydantic",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+]
+
+[project.scripts]
+browser-agent = "browser_agent.main:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
