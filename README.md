@@ -2,7 +2,7 @@
 
 `browser-agent-foundation` is a Python-first project scaffold for an autonomous browser agent that can accept a natural-language task, operate inside a browser session, and keep running until the task is complete or it needs more input from the user.
 
-The current repository intentionally focuses on the engineering foundation rather than full task automation. It sets up the architecture, typed contracts, safety model, runtime loop skeleton, and developer-facing documentation required to build a strong demo-ready system without hardcoded task flows.
+The repository now includes a real Playwright-backed browser runtime skeleton. It keeps the original architectural boundaries intact while replacing the stub browser layer with live navigation, observation, interaction, and trace collection primitives that are honest enough for demos and further planner work.
 
 ## Goals
 
@@ -56,24 +56,33 @@ tests/                 Smoke and contract tests for the foundation
 
 1. Create a virtual environment.
 2. Install the package with development dependencies.
-3. Run the CLI.
+3. Install Playwright browser binaries.
+4. Run the CLI.
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -e .[dev]
+playwright install chromium
 browser-agent "Review my inbox for spam"
 ```
 
 You can also pass flags:
 
 ```bash
-browser-agent --start-url https://mail.example.com --max-steps 12 "Delete obvious spam"
+browser-agent --headed --start-url https://example.com --max-steps 12 "Inspect the page"
+browser-agent --capture-screenshots --start-url https://example.com --json "Observe the current page"
+```
+
+If the `playwright` shell command is unavailable in your environment, run the browser install step through Python instead:
+
+```bash
+python -m playwright install chromium
 ```
 
 ## Current Status
 
-Current stage: foundation only.
+Current stage: real browser runtime skeleton.
 
 What already exists:
 
@@ -81,14 +90,28 @@ What already exists:
 - typed runtime models for the agent loop and tool contracts;
 - a modular skill system with a default registry;
 - a safety layer for confirmation gating;
-- a minimal CLI bootstrap and smoke tests.
+- a real Playwright-backed browser adapter with lifecycle management;
+- real page observation, interactive element extraction, navigation, clicking, typing, and text extraction;
+- structured execution trace artifacts with step metadata and optional screenshots;
+- smoke, contract, selector, runtime-mapping, and local browser integration tests.
 
 What is intentionally not implemented yet:
 
-- a real Playwright-backed browser engine;
 - an LLM integration that produces live decisions from prompts;
-- persistent memory beyond the in-memory runtime session;
+- deep multi-step autonomous planning beyond the foundation bootstrap planner;
+- confirmation resume flows after `waiting_for_user`;
+- persistent memory beyond the current process and trace artifacts;
 - scenario execution depth for inbox, food, or job workflows.
+
+## Demo Reality
+
+The CLI now runs a real browser session. The current demo flow is intentionally narrow and honest:
+
+- if `--start-url` is provided, the foundation planner performs one typed `navigate` action;
+- the runtime captures a real `observe_page` snapshot through Playwright;
+- the task finishes with a transparent report that explains the planner is still foundation-level.
+
+This repository still does not claim general autonomy. The browser runtime is real; the planner remains intentionally small.
 
 ## Key Design Principles
 
@@ -109,4 +132,4 @@ What is intentionally not implemented yet:
 
 ## Next Steps
 
-The next milestone is to replace the stub browser engine with a Playwright adapter, wire the planner to a real LLM, and evolve the agent loop from bootstrap mode into a fully observable autonomous runtime.
+The next milestone is to replace the foundation planner with a real LLM-backed planner, expand reusable browser skills, and evolve the current browser skeleton into a multi-step autonomous runtime without introducing task-specific scripts.

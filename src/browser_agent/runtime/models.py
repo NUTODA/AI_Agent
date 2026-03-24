@@ -61,8 +61,31 @@ class InteractiveElement(BaseModel):
 
     element_id: str = Field(default_factory=lambda: new_id("element"))
     label: str
+    tag: str | None = None
     role: str | None = None
+    text: str | None = None
+    aria_label: str | None = None
+    placeholder: str | None = None
     selector: str
+    selector_candidates: list[str] = Field(default_factory=list)
+    is_visible: bool = True
+    is_enabled: bool = True
+    is_clickable: bool = False
+    is_input: bool = False
+    attributes: dict[str, Any] = Field(default_factory=dict)
+
+
+class FormFieldSummary(BaseModel):
+    """Compact description of an observed input-like control."""
+
+    field_id: str = Field(default_factory=lambda: new_id("field"))
+    label: str | None = None
+    name: str | None = None
+    selector: str
+    field_type: str | None = None
+    placeholder: str | None = None
+    required: bool = False
+    filled: bool = False
     is_visible: bool = True
     is_enabled: bool = True
     attributes: dict[str, Any] = Field(default_factory=dict)
@@ -89,6 +112,8 @@ class AgentObservation(BaseModel):
     summary: str
     visible_text_excerpt: str = ""
     interactive_elements: list[InteractiveElement] = Field(default_factory=list)
+    form_fields: list[FormFieldSummary] = Field(default_factory=list)
+    observation_errors: list[str] = Field(default_factory=list)
     artifact_refs: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
     observed_at: datetime = Field(default_factory=utc_now)
@@ -142,6 +167,7 @@ class ToolResult(BaseModel):
     artifacts: list[str] = Field(default_factory=list)
     error_code: str | None = None
     error_message: str | None = None
+    duration_ms: int | None = None
     completed_at: datetime = Field(default_factory=utc_now)
 
 
@@ -153,6 +179,15 @@ class ExecutionTraceItem(BaseModel):
     observation_id: str | None = None
     thought_id: str | None = None
     action_id: str | None = None
+    action_name: str | None = None
+    action_input: dict[str, Any] = Field(default_factory=dict)
+    status: ToolExecutionStatus | None = None
+    output_summary: str | None = None
+    duration_ms: int | None = None
+    current_url: str | None = None
+    page_title: str | None = None
+    error_message: str | None = None
+    artifacts: list[str] = Field(default_factory=list)
     tool_call: ToolCall | None = None
     tool_result: ToolResult | None = None
     notes: list[str] = Field(default_factory=list)

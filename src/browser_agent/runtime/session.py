@@ -120,6 +120,12 @@ class RuntimeSession:
 
         return self.actions[-1] if self.actions else None
 
+    @property
+    def latest_tool_result(self) -> ToolResult | None:
+        """Return the most recent tool result if available."""
+
+        return self.tool_results[-1] if self.tool_results else None
+
     def summary(self) -> dict[str, object]:
         """Return a concise planner-facing summary of the session state."""
 
@@ -127,12 +133,25 @@ class RuntimeSession:
             "session_id": self.session_id,
             "task_id": self.task.task_id,
             "task_request": self.task.request,
+            "task_start_url": self.task.start_url,
             "status": self.status.value,
             "observation_count": len(self.observations),
             "action_count": len(self.actions),
             "tool_result_count": len(self.tool_results),
             "latest_url": (
                 self.latest_observation.page_url if self.latest_observation else None
+            ),
+            "latest_page_title": (
+                self.latest_observation.page_title if self.latest_observation else None
+            ),
+            "latest_observation_summary": (
+                self.latest_observation.summary if self.latest_observation else None
+            ),
+            "latest_action_name": (
+                self.latest_action.tool_name if self.latest_action else None
+            ),
+            "latest_tool_status": (
+                self.latest_tool_result.status.value if self.latest_tool_result else None
             ),
             "pending_confirmation": (
                 self.pending_confirmation.model_dump(mode="json")

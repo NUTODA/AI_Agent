@@ -48,6 +48,7 @@ Output contract:
 - page summary
 - optional text excerpt
 - optional list of interactive elements
+- optional form-field summaries and observation warnings
 
 Constraints:
 - should return a concise state representation;
@@ -68,7 +69,7 @@ Input contract:
 - optional `max_elements`
 
 Output contract:
-- ordered list of interactive element descriptors with labels, roles, selectors, and visibility hints.
+- ordered list of interactive element descriptors with labels, tags, selectors, selector candidates, and visibility hints.
 
 Constraints:
 - should prioritize user-relevant controls;
@@ -88,12 +89,13 @@ Purpose:
 
 Input contract:
 - `url: str`
-- optional `wait_for: str`
+- optional `wait_for: "load" | "domcontentloaded" | "networkidle" | "commit"`
 
 Output contract:
 - resolved URL
 - page title if available
 - navigation status message
+- normalized page observation after navigation
 
 Constraints:
 - must respect any host restrictions configured by policy;
@@ -112,13 +114,13 @@ Purpose:
 - click a chosen interactive element.
 
 Input contract:
-- `selector: str`
+- `selector: str` or `element_id: str`
 - optional `element_name: str`
 
 Output contract:
-- selector used
+- resolved target used
 - click status
-- optional notes about resulting page change
+- optional resulting page observation
 
 Constraints:
 - must never bypass safety checks for destructive clicks;
@@ -135,14 +137,17 @@ Purpose:
 - enter text into a field or editable region.
 
 Input contract:
-- `selector: str`
+- `selector: str` or `element_id: str`
 - `text: str`
+- optional `clear_first: bool`
 - optional `submit: bool`
 
 Output contract:
-- selector used
+- resolved target used
 - number of characters entered
+- whether the field was cleared first
 - status message
+- optional resulting page observation
 
 Constraints:
 - secrets should not be echoed into logs;
@@ -246,7 +251,7 @@ Likely later additions:
 - `upload_file`
 - `download_file`
 - `read_dialog`
-- `capture_screenshot`
+- `capture_screenshot` as an explicit user-facing skill if bounded observation screenshots are no longer enough
 
 ## Anti-Patterns
 

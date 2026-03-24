@@ -24,6 +24,10 @@ class FinishTaskOutput(BaseModel):
     summary: str
     next_steps: list[str] = Field(default_factory=list)
     open_questions: list[str] = Field(default_factory=list)
+    final_url: str | None = None
+    page_title: str | None = None
+    action_count: int = 0
+    observation_count: int = 0
 
 
 class FinishTaskSkill(BaseSkill):
@@ -39,9 +43,14 @@ class FinishTaskSkill(BaseSkill):
         context: SkillContext,
         payload: FinishTaskInput,
     ) -> FinishTaskOutput:
+        latest_observation = context.session.latest_observation
         return FinishTaskOutput(
             status=payload.status,
             summary=payload.summary,
             next_steps=payload.next_steps,
             open_questions=payload.open_questions,
+            final_url=latest_observation.page_url if latest_observation else None,
+            page_title=latest_observation.page_title if latest_observation else None,
+            action_count=len(context.session.actions),
+            observation_count=len(context.session.observations),
         )

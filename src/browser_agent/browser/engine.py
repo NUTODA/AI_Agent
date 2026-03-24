@@ -1,17 +1,328 @@
-"""Browser engine interfaces and a stub implementation.
-
-The real Playwright adapter belongs here in a later milestone. The current
-foundation ships a small in-memory engine so that the runtime, skills, and CLI
-already have a coherent contract surface.
-"""
+"""Browser engine interfaces and Playwright-backed implementations."""
 
 from __future__ import annotations
 
-from typing import Any, Protocol
+from datetime import datetime, timezone
+from pathlib import Path
+from time import perf_counter
+from typing import TYPE_CHECKING, Any, Protocol
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field
 
-from browser_agent.browser.page_state import PageState
+from browser_agent.browser.page_state import (
+    ElementRole,
+    FormFieldState,
+    InteractiveElementState,
+    PageState,
+)
+from browser_agent.browser.selectors import (
+    build_selector_candidates,
+    resolve_target_candidates,
+)
+
+if TYPE_CHECKING:
+    from playwright.sync_api import Browser, BrowserContext, Page, Playwright
+
+
+ALLOWED_WAIT_UNTIL = {"load", "domcontentloaded", "networkidle", "commit"}
+ALLOWED_URL_SCHEMES = {"http", "https", "file", "data", "about"}
+
+PAGE_SNAPSHOT_SCRIPT = """
+([maxTextChars, maxElements]) => {
+  const normalizeText = (value) => {
+    if (typeof value !== "string") {
+      return "";
+    }
+    return value.replace(/\\s+/g, " ").trim();
+  };
+
+  const isVisible = (element) => {
+    if (!element || !element.isConnected) {
+      return false;
+    }
+    const style = window.getComputedStyle(element);
+    if (!style) {
+      return false;
+    }
+    if (
+      style.display === "none" ||
+      style.visibility === "hidden" ||
+      style.opacity === "0"
+    ) {
+      return false;
+    }
+    const rect = element.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  };
+
+  const isEnabled = (element) =>
+    !element.hasAttribute("disabled") &&
+    element.getAttribute("aria-disabled") !== "true";
+
+  const cleanObject = (value) =>
+    Object.fromEntries(
+      Object.entries(value).filter(([, item]) => item !== null && item !== "")
+    );
+
+  const cssPath = (element) => {
+    if (!element || element.nodeType !== Node.ELEMENT_NODE) {
+      return "";
+    }
+    const parts = [];
+    let current = element;
+    while (current && current.nodeType === Node.ELEMENT_NODE && parts.length < 5) {
+      const tag = current.tagName.toLowerCase();
+      if (current.id) {
+        parts.unshift(`${tag}[id="${current.id.replace(/"/g, '\\"')}"]`);
+        break;
+      }
+      const parent = current.parentElement;
+      if (!parent) {
+        parts.unshift(tag);
+        break;
+      }
+      const siblings = Array.from(parent.children).filter(
+        (candidate) => candidate.tagName === current.tagName
+      );
+      if (siblings.length === 1) {
+        parts.unshift(tag);
+      } else {
+        const index = siblings.indexOf(current) + 1;
+        parts.unshift(`${tag}:nth-of-type(${index})`);
+      }
+      current = parent;
+    }
+    return parts.join(" > ");
+  };
+
+  const textContent = (element) =>
+    normalizeText(element.innerText || element.textContent || "");
+
+  const labelledByText = (element) => {
+    const labelledBy = normalizeText(element.getAttribute("aria-labelledby"));
+    if (!labelledBy) {
+      return "";
+    }
+    return normalizeText(
+      labelledBy
+        .split(/\\s+/)
+        .map((id) => document.getElementById(id))
+        .filter(Boolean)
+        .map((node) => node.innerText || node.textContent || "")
+        .join(" ")
+    );
+  };
+
+  const labelText = (element) => {
+    if (element.labels && element.labels.length > 0) {
+      const label = normalizeText(
+        Array.from(element.labels)
+          .map((node) => node.innerText || node.textContent || "")
+          .join(" ")
+      );
+      if (label) {
+        return label;
+      }
+    }
+    const ariaLabel = normalizeText(element.getAttribute("aria-label"));
+    if (ariaLabel) {
+      return ariaLabel;
+    }
+    const labelledBy = labelledByText(element);
+    if (labelledBy) {
+      return labelledBy;
+    }
+    const placeholder = normalizeText(element.getAttribute("placeholder"));
+    if (placeholder) {
+      return placeholder;
+    }
+    const text = textContent(element);
+    if (text) {
+      return text;
+    }
+    return (
+      normalizeText(element.getAttribute("name")) ||
+      normalizeText(element.getAttribute("id")) ||
+      normalizeText(element.getAttribute("value")) ||
+      element.tagName.toLowerCase()
+    );
+  };
+
+  const roleFor = (element) => {
+    const explicitRole = normalizeText(element.getAttribute("role"));
+    if (explicitRole) {
+      return explicitRole;
+    }
+    const tag = element.tagName.toLowerCase();
+    const type = normalizeText(element.getAttribute("type"));
+    if (tag === "button") {
+      return "button";
+    }
+    if (tag === "a") {
+      return "link";
+    }
+    if (tag === "textarea") {
+      return "textarea";
+    }
+    if (tag === "select") {
+      return "combobox";
+    }
+    if (tag === "input") {
+      if (type === "checkbox") {
+        return "checkbox";
+      }
+      if (type === "radio") {
+        return "radio";
+      }
+      return "input";
+    }
+    return "other";
+  };
+
+  const isInputLike = (element, tag, role) =>
+    ["input", "textarea", "select"].includes(tag) ||
+    ["input", "textarea", "checkbox", "radio", "combobox"].includes(role) ||
+    element.getAttribute("contenteditable") === "true";
+
+  const isClickable = (element, tag, role) =>
+    ["button", "a"].includes(tag) ||
+    ["button", "link", "menuitem", "checkbox", "radio"].includes(role) ||
+    element.hasAttribute("onclick");
+
+  const candidateSelector = [
+    "button",
+    "a[href]",
+    "input",
+    "textarea",
+    "select",
+    "[role='button']",
+    "[role='link']",
+    "[role='menuitem']",
+    "[role='checkbox']",
+    "[role='radio']",
+    "[role='combobox']",
+    "[contenteditable='true']",
+    "[tabindex]:not([tabindex='-1'])"
+  ].join(", ");
+
+  const interactiveElements = [];
+  const seen = new Set();
+  for (const element of document.querySelectorAll(candidateSelector)) {
+    if (seen.has(element)) {
+      continue;
+    }
+    seen.add(element);
+    if (!isVisible(element)) {
+      continue;
+    }
+    const tag = element.tagName.toLowerCase();
+    const role = roleFor(element);
+    const text = textContent(element);
+    const ariaLabel = normalizeText(element.getAttribute("aria-label"));
+    const placeholder = normalizeText(element.getAttribute("placeholder"));
+    const name = labelText(element);
+    interactiveElements.push({
+      name,
+      tag,
+      role,
+      text: text || null,
+      aria_label: ariaLabel || null,
+      placeholder: placeholder || null,
+      selector: cssPath(element),
+      visible: true,
+      enabled: isEnabled(element),
+      clickable: isClickable(element, tag, role),
+      input_like: isInputLike(element, tag, role),
+      attributes: cleanObject({
+        id: normalizeText(element.getAttribute("id")),
+        name: normalizeText(element.getAttribute("name")),
+        "data-testid": normalizeText(element.getAttribute("data-testid")),
+        "aria-label": ariaLabel,
+        placeholder,
+        type: normalizeText(element.getAttribute("type"))
+      })
+    });
+    if (interactiveElements.length >= maxElements) {
+      break;
+    }
+  }
+
+  const formFields = [];
+  for (const element of document.querySelectorAll("input, textarea, select, [contenteditable='true']")) {
+    if (!isVisible(element)) {
+      continue;
+    }
+    const tag = element.tagName.toLowerCase();
+    const type = normalizeText(element.getAttribute("type")) || tag;
+    const value =
+      type === "password"
+        ? ""
+        : normalizeText(
+            tag === "select"
+              ? element.value || ""
+              : element.value || element.textContent || ""
+          );
+    formFields.push({
+      label: labelText(element) || null,
+      name: normalizeText(element.getAttribute("name")) || null,
+      selector: cssPath(element),
+      field_type: type,
+      placeholder: normalizeText(element.getAttribute("placeholder")) || null,
+      required: element.required === true || element.getAttribute("aria-required") === "true",
+      filled:
+        type === "checkbox" || type === "radio"
+          ? Boolean(element.checked)
+          : Boolean(value),
+      visible: true,
+      enabled: isEnabled(element),
+      attributes: cleanObject({
+        id: normalizeText(element.getAttribute("id")),
+        name: normalizeText(element.getAttribute("name")),
+        "data-testid": normalizeText(element.getAttribute("data-testid")),
+        autocomplete: normalizeText(element.getAttribute("autocomplete")),
+        type
+      })
+    });
+  }
+
+  const bodyText = normalizeText(document.body ? document.body.innerText : "");
+  return {
+    url: window.location.href,
+    title: document.title || "Untitled Page",
+    text_excerpt: bodyText.slice(0, maxTextChars),
+    interactive_elements: interactiveElements,
+    form_fields: formFields,
+    metadata: {
+      visible_text_length: bodyText.length,
+      interactive_count: interactiveElements.length,
+      form_field_count: formFields.length,
+      document_ready_state: document.readyState
+    }
+  };
+}
+"""
+
+
+def utc_now() -> datetime:
+    """Return a timezone-aware UTC timestamp."""
+
+    return datetime.now(timezone.utc)
+
+
+class BrowserRuntimeError(RuntimeError):
+    """Raised when the Playwright runtime cannot be prepared or accessed."""
+
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.metadata = metadata or {}
 
 
 class BrowserOperationResult(BaseModel):
@@ -21,6 +332,10 @@ class BrowserOperationResult(BaseModel):
     message: str
     page_state: PageState | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+    error_code: str | None = None
+    error_message: str | None = None
+    duration_ms: int | None = None
+    artifacts: list[str] = Field(default_factory=list)
 
 
 class BrowserEngine(Protocol):
@@ -32,30 +347,54 @@ class BrowserEngine(Protocol):
     def stop(self) -> None:
         """Cleanly shut down the browser runtime."""
 
+    def new_page(self) -> Any:
+        """Create and activate a new browser page."""
+
+    def get_page(self) -> Any:
+        """Return the current active browser page."""
+
+    def observe_page(self) -> PageState:
+        """Capture a compact page snapshot."""
+
     def get_page_state(self) -> PageState:
         """Return the current page snapshot."""
 
-    def navigate(self, url: str) -> BrowserOperationResult:
+    def get_page_text(self, max_chars: int = 4000) -> str:
+        """Extract page text for reasoning or reporting."""
+
+    def get_interactive_elements(
+        self,
+        max_elements: int = 25,
+    ) -> list[InteractiveElementState]:
+        """Return interactive elements from the current page."""
+
+    def navigate(
+        self,
+        url: str,
+        *,
+        wait_for: str | None = None,
+    ) -> BrowserOperationResult:
         """Navigate to a new URL."""
 
-    def click(self, selector: str) -> BrowserOperationResult:
-        """Click an element identified by the selector."""
+    def click(self, target: str) -> BrowserOperationResult:
+        """Click an element identified by selector or element reference."""
 
     def type_text(
         self,
-        selector: str,
+        target: str,
         text: str,
         *,
+        clear_first: bool = True,
         submit: bool = False,
     ) -> BrowserOperationResult:
         """Type text into the given element."""
 
     def extract_page_text(self, max_chars: int = 4000) -> str:
-        """Extract page text for reasoning or reporting."""
+        """Backward-compatible alias for page text extraction."""
 
 
 class StubBrowserEngine:
-    """In-memory browser stub used until the Playwright adapter is added."""
+    """In-memory browser stub kept for smoke tests and isolated unit tests."""
 
     def __init__(self, initial_state: PageState | None = None) -> None:
         self._started = False
@@ -67,58 +406,655 @@ class StubBrowserEngine:
     def stop(self) -> None:
         self._started = False
 
-    def get_page_state(self) -> PageState:
+    def new_page(self) -> None:
+        self._state = PageState()
+        return None
+
+    def get_page(self) -> None:
+        if not self._started:
+            self.start()
+        return None
+
+    def observe_page(self) -> PageState:
         if not self._started:
             self.start()
         return self._state
 
-    def navigate(self, url: str) -> BrowserOperationResult:
+    def get_page_state(self) -> PageState:
+        return self.observe_page()
+
+    def get_page_text(self, max_chars: int = 4000) -> str:
+        return self.observe_page().text_excerpt[:max_chars]
+
+    def get_interactive_elements(
+        self,
+        max_elements: int = 25,
+    ) -> list[InteractiveElementState]:
+        return self.observe_page().interactive_elements[:max_elements]
+
+    def navigate(
+        self,
+        url: str,
+        *,
+        wait_for: str | None = None,
+    ) -> BrowserOperationResult:
         self._state = PageState(
             url=url,
             title="Stub Browser Page",
             summary="Stub browser navigated to the requested URL.",
             text_excerpt=f"Stub page loaded at {url}.",
+            metadata={"wait_for": wait_for or "load"},
         )
         return BrowserOperationResult(
             message=f"Navigated to {url}.",
             page_state=self._state,
+            metadata={"wait_for": wait_for or "load"},
         )
 
-    def click(self, selector: str) -> BrowserOperationResult:
-        page_state = self.get_page_state().model_copy(
+    def click(self, target: str) -> BrowserOperationResult:
+        page_state = self.observe_page().model_copy(
             update={
-                "summary": f"Stub browser registered a click on {selector}.",
-                "metadata": {"last_clicked_selector": selector},
+                "summary": f"Stub browser registered a click on {target}.",
+                "metadata": {"last_clicked_target": target},
             },
         )
         self._state = page_state
         return BrowserOperationResult(
-            message=f"Clicked {selector}.",
+            message=f"Clicked {target}.",
             page_state=page_state,
+            metadata={"resolved_target": target},
         )
 
     def type_text(
         self,
-        selector: str,
+        target: str,
         text: str,
         *,
+        clear_first: bool = True,
         submit: bool = False,
     ) -> BrowserOperationResult:
-        page_state = self.get_page_state().model_copy(
+        page_state = self.observe_page().model_copy(
             update={
-                "summary": f"Stub browser entered text into {selector}.",
+                "summary": f"Stub browser entered text into {target}.",
                 "metadata": {
-                    "last_typed_selector": selector,
+                    "last_typed_target": target,
                     "submitted": submit,
                     "characters_entered": len(text),
+                    "clear_first": clear_first,
                 },
             },
         )
         self._state = page_state
         return BrowserOperationResult(
-            message=f"Typed into {selector}.",
+            message=f"Typed into {target}.",
             page_state=page_state,
+            metadata={
+                "resolved_target": target,
+                "submitted": submit,
+                "characters_entered": len(text),
+                "clear_first": clear_first,
+            },
         )
 
     def extract_page_text(self, max_chars: int = 4000) -> str:
-        return self.get_page_state().text_excerpt[:max_chars]
+        return self.get_page_text(max_chars=max_chars)
+
+
+class PlaywrightBrowserEngine:
+    """Real browser engine backed by Playwright."""
+
+    def __init__(
+        self,
+        *,
+        headless: bool = True,
+        default_timeout_ms: int = 5_000,
+        max_text_chars: int = 4_000,
+        max_interactive_elements: int = 25,
+        artifact_dir: Path | str | None = None,
+        capture_screenshots: bool = False,
+    ) -> None:
+        self.headless = headless
+        self.default_timeout_ms = default_timeout_ms
+        self.max_text_chars = max_text_chars
+        self.max_interactive_elements = max_interactive_elements
+        self.capture_screenshots = capture_screenshots
+        self.artifact_dir = Path(artifact_dir) if artifact_dir is not None else None
+        self._playwright: Playwright | None = None
+        self._browser: Browser | None = None
+        self._context: BrowserContext | None = None
+        self._page: Page | None = None
+        self._last_page_state: PageState | None = None
+        self._element_cache: dict[str, InteractiveElementState] = {}
+
+    def start(self) -> None:
+        """Prepare the Playwright runtime."""
+
+        if self._playwright is not None:
+            return
+
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError as exc:
+            raise BrowserRuntimeError(
+                "playwright_missing",
+                "Playwright is not installed in the current environment.",
+                metadata={"details": str(exc)},
+            ) from exc
+
+        try:
+            self._playwright = sync_playwright().start()
+            self._browser = self._playwright.chromium.launch(headless=self.headless)
+            self._context = self._browser.new_context()
+            self._context.set_default_timeout(self.default_timeout_ms)
+            self._context.set_default_navigation_timeout(self.default_timeout_ms)
+            self._page = self._context.new_page()
+            self._page.set_default_timeout(self.default_timeout_ms)
+        except Exception as exc:
+            self.stop()
+            message = "Failed to start the Playwright browser runtime."
+            code = "browser_start_failed"
+            details = str(exc)
+            if "Executable doesn't exist" in details:
+                code = "browser_executable_missing"
+                message = (
+                    "Failed to start the Playwright browser runtime because browser "
+                    "binaries are missing. Run `playwright install`."
+                )
+            raise BrowserRuntimeError(
+                code,
+                message,
+                metadata={"details": details},
+            ) from exc
+
+    def stop(self) -> None:
+        """Cleanly shut down the browser runtime."""
+
+        for resource in (self._page, self._context, self._browser):
+            if resource is None:
+                continue
+            try:
+                resource.close()
+            except Exception:
+                pass
+        if self._playwright is not None:
+            try:
+                self._playwright.stop()
+            except Exception:
+                pass
+
+        self._playwright = None
+        self._browser = None
+        self._context = None
+        self._page = None
+        self._last_page_state = None
+        self._element_cache = {}
+
+    def new_page(self) -> Page:
+        """Create and activate a new browser page."""
+
+        if self._playwright is None:
+            self.start()
+        if self._context is None:
+            raise BrowserRuntimeError(
+                "browser_context_unavailable",
+                "Browser context is unavailable after startup.",
+            )
+        self._page = self._context.new_page()
+        self._page.set_default_timeout(self.default_timeout_ms)
+        return self._page
+
+    def get_page(self) -> Page:
+        """Return the current active browser page."""
+
+        self.start()
+        if self._page is None or self._page.is_closed():
+            return self.new_page()
+        return self._page
+
+    def observe_page(self) -> PageState:
+        """Capture a compact page snapshot."""
+
+        return self._observe_page(reason="observe_page")
+
+    def get_page_state(self) -> PageState:
+        """Backward-compatible alias for observation calls."""
+
+        return self.observe_page()
+
+    def get_page_text(self, max_chars: int = 4000) -> str:
+        """Extract visible page text using the live browser page."""
+
+        page = self.get_page()
+        try:
+            text = page.evaluate(
+                "() => document.body ? (document.body.innerText || '') : ''"
+            )
+        except Exception as exc:
+            raise BrowserRuntimeError(
+                "page_text_extraction_failed",
+                "Failed to extract visible page text.",
+                metadata={"details": str(exc)},
+            ) from exc
+        return self._truncate_text(text or "", max_chars=max_chars)
+
+    def get_interactive_elements(
+        self,
+        max_elements: int = 25,
+    ) -> list[InteractiveElementState]:
+        """Return interactive elements from a fresh page snapshot."""
+
+        return self._observe_page(
+            reason="get_interactive_elements",
+            max_elements=max_elements,
+        ).interactive_elements[:max_elements]
+
+    def navigate(
+        self,
+        url: str,
+        *,
+        wait_for: str | None = None,
+    ) -> BrowserOperationResult:
+        """Navigate to a new URL."""
+
+        start = perf_counter()
+        try:
+            wait_until = self._normalize_wait_for(wait_for)
+        except BrowserRuntimeError as exc:
+            return self._result_from_exception(
+                action="navigate",
+                exc=exc,
+                start=start,
+                metadata={"url": url, "wait_for": wait_for},
+            )
+        if not self._is_supported_url(url):
+            return self._result_error(
+                action="navigate",
+                message=f"Unsupported or invalid URL: {url}",
+                error_code="invalid_url",
+                duration_ms=self._elapsed_ms(start),
+                metadata={"url": url},
+            )
+
+        page = self.get_page()
+        try:
+            response = page.goto(
+                url,
+                wait_until=wait_until,
+                timeout=self.default_timeout_ms,
+            )
+            page_state = self._observe_page(reason="navigate")
+            metadata = {
+                "url": url,
+                "wait_for": wait_until,
+                "http_status": response.status if response is not None else None,
+            }
+            return BrowserOperationResult(
+                message=f"Navigated to {page_state.url}.",
+                page_state=page_state,
+                metadata=metadata,
+                duration_ms=self._elapsed_ms(start),
+                artifacts=page_state.artifact_refs,
+            )
+        except Exception as exc:
+            return self._result_from_exception(
+                action="navigate",
+                exc=exc,
+                start=start,
+                metadata={"url": url, "wait_for": wait_until},
+            )
+
+    def click(self, target: str) -> BrowserOperationResult:
+        """Click an element identified by selector or element reference."""
+
+        start = perf_counter()
+        page = self.get_page()
+        resolution = resolve_target_candidates(target, self._element_cache)
+        if resolution.used_element_reference and not resolution.candidates:
+            return self._result_error(
+                action="click",
+                message=f"Element reference `{target}` is no longer available.",
+                error_code="element_reference_not_found",
+                duration_ms=self._elapsed_ms(start),
+                metadata={"target": target},
+            )
+
+        errors: list[str] = []
+        for candidate in resolution.candidates:
+            try:
+                locator = page.locator(candidate.value).first
+                locator.click(timeout=self.default_timeout_ms)
+                page_state = self._observe_page(reason="click")
+                return BrowserOperationResult(
+                    message=f"Clicked target `{target}`.",
+                    page_state=page_state,
+                    metadata={
+                        "target": target,
+                        "resolved_selector": candidate.value,
+                        "selector_strategy": candidate.strategy.value,
+                        "used_element_reference": resolution.used_element_reference,
+                    },
+                    duration_ms=self._elapsed_ms(start),
+                    artifacts=page_state.artifact_refs,
+                )
+            except Exception as exc:
+                errors.append(f"{candidate.value}: {exc}")
+
+        return self._result_error(
+            action="click",
+            message=f"Failed to click target `{target}`.",
+            error_code="click_failed",
+            error_message=" | ".join(errors),
+            duration_ms=self._elapsed_ms(start),
+            metadata={
+                "target": target,
+                "attempted_selectors": [candidate.value for candidate in resolution.candidates],
+                "used_element_reference": resolution.used_element_reference,
+            },
+        )
+
+    def type_text(
+        self,
+        target: str,
+        text: str,
+        *,
+        clear_first: bool = True,
+        submit: bool = False,
+    ) -> BrowserOperationResult:
+        """Type text into an editable control."""
+
+        start = perf_counter()
+        page = self.get_page()
+        resolution = resolve_target_candidates(target, self._element_cache)
+        if resolution.used_element_reference and not resolution.candidates:
+            return self._result_error(
+                action="type_text",
+                message=f"Element reference `{target}` is no longer available.",
+                error_code="element_reference_not_found",
+                duration_ms=self._elapsed_ms(start),
+                metadata={"target": target},
+            )
+
+        errors: list[str] = []
+        for candidate in resolution.candidates:
+            try:
+                locator = page.locator(candidate.value).first
+                locator.click(timeout=self.default_timeout_ms)
+                if clear_first:
+                    locator.fill(text, timeout=self.default_timeout_ms)
+                else:
+                    locator.type(text, timeout=self.default_timeout_ms)
+                if submit:
+                    locator.press("Enter", timeout=self.default_timeout_ms)
+                page_state = self._observe_page(reason="type_text")
+                return BrowserOperationResult(
+                    message=f"Entered text into target `{target}`.",
+                    page_state=page_state,
+                    metadata={
+                        "target": target,
+                        "resolved_selector": candidate.value,
+                        "selector_strategy": candidate.strategy.value,
+                        "used_element_reference": resolution.used_element_reference,
+                        "clear_first": clear_first,
+                        "submitted": submit,
+                        "characters_entered": len(text),
+                    },
+                    duration_ms=self._elapsed_ms(start),
+                    artifacts=page_state.artifact_refs,
+                )
+            except Exception as exc:
+                errors.append(f"{candidate.value}: {exc}")
+
+        return self._result_error(
+            action="type_text",
+            message=f"Failed to enter text into target `{target}`.",
+            error_code="type_text_failed",
+            error_message=" | ".join(errors),
+            duration_ms=self._elapsed_ms(start),
+            metadata={
+                "target": target,
+                "attempted_selectors": [candidate.value for candidate in resolution.candidates],
+                "used_element_reference": resolution.used_element_reference,
+                "clear_first": clear_first,
+                "submitted": submit,
+                "characters_entered": len(text),
+            },
+        )
+
+    def extract_page_text(self, max_chars: int = 4000) -> str:
+        """Backward-compatible alias for page text extraction."""
+
+        return self.get_page_text(max_chars=max_chars)
+
+    def _observe_page(
+        self,
+        *,
+        reason: str,
+        max_elements: int | None = None,
+    ) -> PageState:
+        page = self.get_page()
+        observation_errors: list[str] = []
+
+        try:
+            raw_snapshot = page.evaluate(
+                PAGE_SNAPSHOT_SCRIPT,
+                [self.max_text_chars, max_elements or self.max_interactive_elements],
+            )
+        except Exception as exc:
+            observation_errors.append(str(exc))
+            raw_snapshot = {
+                "url": page.url,
+                "title": page.title() if hasattr(page, "title") else "Untitled Page",
+                "text_excerpt": "",
+                "interactive_elements": [],
+                "form_fields": [],
+                "metadata": {},
+            }
+
+        interactive_elements = [
+            self._build_interactive_element(item)
+            for item in raw_snapshot.get("interactive_elements", [])
+        ]
+        self._element_cache = {
+            element.element_id: element for element in interactive_elements
+        }
+
+        form_fields = [
+            self._build_form_field(item)
+            for item in raw_snapshot.get("form_fields", [])
+        ]
+        artifacts = self._maybe_capture_screenshot(reason=reason)
+        page_state = PageState(
+            url=raw_snapshot.get("url") or page.url,
+            title=raw_snapshot.get("title") or page.title() or "Untitled Page",
+            summary=self._summarize_snapshot(
+                raw_snapshot.get("title") or page.title() or "Untitled Page",
+                raw_snapshot.get("url") or page.url,
+                interactive_elements,
+                form_fields,
+            ),
+            text_excerpt=self._truncate_text(
+                raw_snapshot.get("text_excerpt") or "",
+                max_chars=self.max_text_chars,
+            ),
+            interactive_elements=interactive_elements,
+            form_fields=form_fields,
+            observation_errors=observation_errors,
+            artifact_refs=artifacts,
+            metadata={
+                **raw_snapshot.get("metadata", {}),
+                "captured_reason": reason,
+            },
+            captured_at=utc_now(),
+        )
+        self._last_page_state = page_state
+        return page_state
+
+    def _build_interactive_element(self, raw: dict[str, Any]) -> InteractiveElementState:
+        role = self._map_role(raw.get("role"))
+        element = InteractiveElementState(
+            name=raw.get("name") or raw.get("text") or raw.get("selector") or "element",
+            tag=raw.get("tag") or "div",
+            role=role,
+            selector=raw.get("selector") or "",
+            text=raw.get("text"),
+            aria_label=raw.get("aria_label"),
+            placeholder=raw.get("placeholder"),
+            visible=bool(raw.get("visible", True)),
+            enabled=bool(raw.get("enabled", True)),
+            clickable=bool(raw.get("clickable", False)),
+            input_like=bool(raw.get("input_like", False)),
+            attributes=raw.get("attributes", {}),
+        )
+        candidates = [candidate.value for candidate in build_selector_candidates(element)]
+        primary_selector = candidates[0] if candidates else element.selector
+        return element.model_copy(
+            update={
+                "selector": primary_selector,
+                "selector_candidates": candidates,
+            }
+        )
+
+    def _build_form_field(self, raw: dict[str, Any]) -> FormFieldState:
+        return FormFieldState(
+            label=raw.get("label"),
+            name=raw.get("name"),
+            selector=raw.get("selector") or "",
+            field_type=raw.get("field_type"),
+            placeholder=raw.get("placeholder"),
+            required=bool(raw.get("required", False)),
+            filled=bool(raw.get("filled", False)),
+            visible=bool(raw.get("visible", True)),
+            enabled=bool(raw.get("enabled", True)),
+            attributes=raw.get("attributes", {}),
+        )
+
+    def _map_role(self, raw_role: str | None) -> ElementRole:
+        if raw_role is None:
+            return ElementRole.OTHER
+        normalized = raw_role.lower().strip()
+        role_map = {
+            "button": ElementRole.BUTTON,
+            "link": ElementRole.LINK,
+            "input": ElementRole.INPUT,
+            "textbox": ElementRole.INPUT,
+            "textarea": ElementRole.TEXTAREA,
+            "checkbox": ElementRole.CHECKBOX,
+            "radio": ElementRole.RADIO,
+            "combobox": ElementRole.COMBOBOX,
+            "menuitem": ElementRole.MENU_ITEM,
+        }
+        return role_map.get(normalized, ElementRole.OTHER)
+
+    def _summarize_snapshot(
+        self,
+        title: str,
+        url: str,
+        interactive_elements: list[InteractiveElementState],
+        form_fields: list[FormFieldState],
+    ) -> str:
+        parts = [f"Observed page `{title}` at {url}."]
+        if interactive_elements:
+            parts.append(
+                f"Captured {len(interactive_elements)} interactive elements."
+            )
+        else:
+            parts.append("No visible interactive elements were captured.")
+        if form_fields:
+            parts.append(f"Detected {len(form_fields)} form fields.")
+        return " ".join(parts)
+
+    def _normalize_wait_for(self, wait_for: str | None) -> str:
+        if wait_for is None:
+            return "load"
+        if wait_for not in ALLOWED_WAIT_UNTIL:
+            raise BrowserRuntimeError(
+                "invalid_wait_for",
+                (
+                    "Unsupported wait condition. Expected one of "
+                    f"{sorted(ALLOWED_WAIT_UNTIL)}."
+                ),
+                metadata={"wait_for": wait_for},
+            )
+        return wait_for
+
+    def _is_supported_url(self, url: str) -> bool:
+        parsed = urlparse(url)
+        return parsed.scheme in ALLOWED_URL_SCHEMES
+
+    def _truncate_text(self, text: str, *, max_chars: int) -> str:
+        normalized = " ".join(text.split()).strip()
+        return normalized[:max_chars]
+
+    def _maybe_capture_screenshot(self, *, reason: str) -> list[str]:
+        if not self.capture_screenshots or self.artifact_dir is None:
+            return []
+        page = self.get_page()
+        self.artifact_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = utc_now().strftime("%Y%m%dT%H%M%S%fZ")
+        screenshot_path = self.artifact_dir / f"{reason}_{timestamp}.png"
+        try:
+            page.screenshot(path=str(screenshot_path))
+        except Exception:
+            return []
+        return [str(screenshot_path)]
+
+    def _result_from_exception(
+        self,
+        *,
+        action: str,
+        exc: Exception,
+        start: float,
+        metadata: dict[str, Any] | None = None,
+    ) -> BrowserOperationResult:
+        message = f"Browser action `{action}` failed."
+        error_code = f"{action}_failed"
+        details = str(exc)
+        if "Timeout" in exc.__class__.__name__ or "Timeout" in details:
+            error_code = f"{action}_timeout"
+            message = f"Browser action `{action}` timed out."
+        if isinstance(exc, BrowserRuntimeError):
+            error_code = exc.code
+            message = str(exc)
+            metadata = {**(metadata or {}), **exc.metadata}
+        return self._result_error(
+            action=action,
+            message=message,
+            error_code=error_code,
+            error_message=details,
+            duration_ms=self._elapsed_ms(start),
+            metadata=metadata,
+        )
+
+    def _result_error(
+        self,
+        *,
+        action: str,
+        message: str,
+        error_code: str,
+        duration_ms: int,
+        error_message: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> BrowserOperationResult:
+        page_state = self._safe_last_page_state()
+        artifacts = page_state.artifact_refs if page_state is not None else []
+        return BrowserOperationResult(
+            ok=False,
+            message=message,
+            page_state=page_state,
+            metadata=metadata or {},
+            error_code=error_code,
+            error_message=error_message,
+            duration_ms=duration_ms,
+            artifacts=artifacts,
+        )
+
+    def _safe_last_page_state(self) -> PageState | None:
+        if self._last_page_state is not None:
+            return self._last_page_state
+        try:
+            return self._observe_page(reason="error_context")
+        except Exception:
+            return None
+
+    def _elapsed_ms(self, start: float) -> int:
+        return int((perf_counter() - start) * 1000)

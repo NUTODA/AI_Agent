@@ -5,7 +5,7 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 from browser_agent.runtime.models import AgentObservation, InteractiveElement
-from browser_agent.skills.base import BaseSkill, SkillContext
+from browser_agent.skills.base import BaseSkill, SkillContext, SkillExecutionError
 
 
 class ObservePageInput(BaseModel):
@@ -30,7 +30,14 @@ class ObservePageSkill(BaseSkill):
     output_schema = ObservePageOutput
 
     def execute(self, context: SkillContext, payload: ObservePageInput) -> ObservePageOutput:
-        page_state = context.browser.get_page_state()
+        try:
+            page_state = context.browser.observe_page()
+        except Exception as exc:
+            raise SkillExecutionError(
+                message="Failed to observe the current page.",
+                error_code="observe_page_failed",
+                data={"details": str(exc)},
+            ) from exc
         observation = page_state.to_agent_observation()
         if not payload.include_text_excerpt:
             observation.visible_text_excerpt = ""
@@ -49,6 +56,7 @@ class GetInteractiveElementsOutput(BaseModel):
     """Output contract for interactive element extraction."""
 
     elements: list[InteractiveElement] = Field(default_factory=list)
+    observation: AgentObservation | None = None
 
 
 class GetInteractiveElementsSkill(BaseSkill):
@@ -64,8 +72,19 @@ class GetInteractiveElementsSkill(BaseSkill):
         context: SkillContext,
         payload: GetInteractiveElementsInput,
     ) -> GetInteractiveElementsOutput:
-        elements = context.browser.get_page_state().to_agent_observation().interactive_elements
-        return GetInteractiveElementsOutput(elements=elements[: payload.max_elements])
+        try:
+            page_state = context.browser.observe_page()
+        except Exception as exc:
+            raise SkillExecutionError(
+                message="Failed to collect interactive elements from the current page.",
+                error_code="get_interactive_elements_failed",
+                data={"details": str(exc)},
+            ) from exc
+        observation = page_state.to_agent_observation()
+        return GetInteractiveElementsOutput(
+            elements=observation.interactive_elements[: payload.max_elements],
+            observation=observation,
+        )
 
 
 class ExtractPageTextInput(BaseModel):
@@ -95,11 +114,18 @@ class ExtractPageTextSkill(BaseSkill):
         context: SkillContext,
         payload: ExtractPageTextInput,
     ) -> ExtractPageTextOutput:
-        page_state = context.browser.get_page_state()
-        text = context.browser.extract_page_text(max_chars=payload.max_chars)
-        original_excerpt = page_state.text_excerpt
+        try:
+            page_state = context.browser.observe_page()
+            text = context.browser.get_page_text(max_chars=payload.max_chars)
+        except Exception as exc:
+            raise SkillExecutionError(
+                message="Failed to extract page text.",
+                error_code="extract_page_text_failed",
+                data={"details": str(exc)},
+            ) from exc
+        original_text_length = int(page_state.metadata.get("visible_text_length", len(text)))
         return ExtractPageTextOutput(
             text=text,
-            truncated=len(original_excerpt) > payload.max_chars,
+            truncated=original_text_length > payload.max_chars,
             page_url=page_state.url,
         )

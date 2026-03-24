@@ -112,9 +112,10 @@ Purpose:
 - abstract browser operations behind a stable interface.
 
 Responsibilities:
-- manage browser lifecycle and page navigation;
-- expose current page state and interactive elements;
+- manage Playwright browser/context/page lifecycle and page navigation;
+- expose compact page snapshots, interactive elements, and form-field summaries;
 - execute atomic browser actions used by skills;
+- resolve element references through deterministic selector priorities instead of task heuristics;
 - return structured results instead of raw automation primitives.
 
 Out of scope:
@@ -160,10 +161,10 @@ Purpose:
 - make the runtime observable and auditable.
 
 Responsibilities:
-- record execution trace items with timestamps;
-- store action rationale and tool outcomes;
+- record execution trace items with timestamps, durations, URL/title context, and status;
+- store action rationale and structured tool outcomes;
 - keep a minimal audit trail for safety-sensitive operations;
-- support human-readable summaries for debugging and demos.
+- optionally persist JSONL/Markdown trace artifacts and bounded screenshots for debugging and demos.
 
 Out of scope:
 - deciding runtime control flow;
@@ -193,7 +194,7 @@ Out of scope:
 5. The safety layer classifies the action before execution.
 6. If approved, the runtime resolves the action to a registered skill.
 7. The skill interacts with the browser adapter or other runtime services.
-8. The result is recorded as a trace item and stored in the session.
+8. The result is recorded as a trace item, persisted to trace artifacts when configured, and stored in the session.
 9. The loop continues until the task completes or needs user input.
 
 ## Responsibility Boundaries
@@ -212,6 +213,7 @@ To keep the system maintainable, these boundaries are strict:
 This architecture intentionally leaves space for future growth:
 
 - Playwright can be introduced without rewriting the skill contracts.
+- Playwright can remain isolated in `browser/` while `skills` keep the runtime-facing execution surface.
 - Different planners can be swapped in without touching runtime orchestration.
 - New skills can be added without changing the agent loop structure.
 - Safety policies can evolve without coupling them to browser execution logic.

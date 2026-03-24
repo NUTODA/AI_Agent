@@ -72,6 +72,8 @@ Recommended observation fields:
 - summary of what the page appears to be;
 - visible text excerpt;
 - interactive elements available to the agent;
+- compact form or input summaries when relevant;
+- structured observation errors if snapshot capture was partial;
 - optional DOM, screenshot, or trace artifact references;
 - timestamp.
 
@@ -112,9 +114,27 @@ Recommended fields:
 - `artifacts`
 - `error_code`
 - `error_message`
+- `duration_ms`
 - `completed_at`
 
 The result format matters because the planner should react to structured outcomes, not to loosely formatted tool text.
+
+## Trace Artifacts
+
+The runtime trace should be useful even when the planner is still limited.
+
+Minimum useful trace fields:
+
+- action name;
+- action input;
+- output summary;
+- execution status;
+- duration;
+- timestamp;
+- current URL and page title at step time;
+- error message when a step fails.
+
+The current runtime writes in-memory trace items and can also persist JSONL and Markdown summaries in the configured trace directory. When screenshot capture is enabled, observation-linked screenshots are surfaced as bounded artifact refs rather than uncontrolled browser dumps.
 
 ## When The Agent Asks The User
 
@@ -181,12 +201,12 @@ Failures should produce structured errors and preserve enough trace data for deb
 
 ## Bootstrap Reality Of This Repository
 
-This repository only implements the runtime foundation, not the final autonomous system. That means:
+This repository now implements a real browser-backed runtime skeleton, not the final autonomous system. That means:
 
-- the loop skeleton is present;
-- the planner interface is defined;
-- the browser adapter boundary is defined;
-- the default runtime uses a bootstrap planner and stub browser behavior;
-- the code intentionally avoids pretending that full autonomy already exists.
+- the loop skeleton is present and executes typed skills against a real Playwright adapter;
+- the planner interface is defined, but the default planner is still a transparent bootstrap planner;
+- the browser adapter can start a browser, navigate, observe, click, type, and extract text;
+- trace items and optional browser artifacts are real;
+- the code still intentionally avoids pretending that full autonomy already exists.
 
-The purpose of the current runtime is to make the next implementation phases straightforward, safe, and observable.
+The purpose of the current runtime is to make the next implementation phases straightforward, safe, observable, and demo-ready without hardcoded scenario logic.

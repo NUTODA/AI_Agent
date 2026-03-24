@@ -17,6 +17,7 @@ class RuntimeSettings(BaseModel):
     max_text_chars: int = 4_000
     trace_dir: Path = Field(default_factory=lambda: Path("traces"))
     artifact_dir: Path = Field(default_factory=lambda: Path("artifacts"))
+    capture_screenshots: bool = False
     bootstrap_mode: bool = True
     allow_external_navigation: bool = True
 
@@ -31,6 +32,11 @@ class RuntimeSettings(BaseModel):
             max_text_chars=int(os.getenv("BROWSER_AGENT_MAX_TEXT_CHARS", "4000")),
             trace_dir=Path(os.getenv("BROWSER_AGENT_TRACE_DIR", "traces")),
             artifact_dir=Path(os.getenv("BROWSER_AGENT_ARTIFACT_DIR", "artifacts")),
+            capture_screenshots=os.getenv(
+                "BROWSER_AGENT_CAPTURE_SCREENSHOTS",
+                "false",
+            ).lower()
+            == "true",
             bootstrap_mode=os.getenv("BROWSER_AGENT_BOOTSTRAP_MODE", "true").lower() == "true",
             allow_external_navigation=os.getenv(
                 "BROWSER_AGENT_ALLOW_EXTERNAL_NAVIGATION",

@@ -1,5 +1,11 @@
 # Roadmap
 
+## Current Snapshot
+
+- Stage 1 foundation work is complete.
+- Stage 2 browser layer now has a real Playwright-backed implementation.
+- The next major gap is Stage 4 quality: replacing the bootstrap planner with a real multi-step planner while preserving the same boundaries.
+
 ## Stage 1: Foundation Skeleton
 
 Deliverables:
@@ -24,9 +30,10 @@ Readiness criteria:
 Deliverables:
 
 - Playwright-backed browser engine;
-- page snapshot extraction;
+- compact page snapshot extraction;
 - navigation and interaction primitives;
-- selector strategy helpers.
+- selector strategy helpers;
+- trace-ready browser results and optional screenshot artifacts.
 
 Risks:
 
@@ -39,6 +46,10 @@ Readiness criteria:
 - the browser engine can start, navigate, observe, click, and type through typed methods;
 - failures are surfaced as structured results;
 - trace data is produced for browser actions.
+
+Status:
+
+- delivered in the current repository state.
 
 ## Stage 3: Skill Registry
 
@@ -59,6 +70,10 @@ Readiness criteria:
 - skills are discoverable through the registry;
 - duplicate registrations are prevented;
 - default runtime skills cover MVP observation, navigation, interaction, safety, and reporting.
+
+Status:
+
+- foundation-complete; the current runtime now executes the existing skill registry against a real browser adapter.
 
 ## Stage 4: Agent Loop
 

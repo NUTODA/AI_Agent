@@ -33,7 +33,45 @@ class FoundationPlanner:
     """
 
     def decide(self, session_summary: dict[str, object]) -> PlannerDecision:
+        task_start_url = session_summary.get("task_start_url")
+        latest_action_name = session_summary.get("latest_action_name")
         observation_count = int(session_summary.get("observation_count", 0))
+        action_count = int(session_summary.get("action_count", 0))
+
+        if action_count == 0 and task_start_url:
+            thought = AgentThought(
+                summary="Navigate to the requested starting page.",
+                rationale=(
+                    "A provided start URL is an explicit operator input, so the "
+                    "bootstrap planner can begin with a single typed navigation "
+                    "step before observing the live page."
+                ),
+            )
+            action = AgentAction(
+                tool_name="navigate",
+                rationale=thought.rationale,
+                parameters={"url": task_start_url, "wait_for": "load"},
+                expected_outcome="Load the requested page before the first observation.",
+                risk_level=RiskLevel.LOW,
+            )
+            return PlannerDecision(thought=thought, action=action)
+
+        if latest_action_name == "navigate":
+            thought = AgentThought(
+                summary="Observe the page after navigation.",
+                rationale=(
+                    "The runtime should capture the page that actually loaded after "
+                    "navigation instead of assuming the resulting state."
+                ),
+            )
+            action = AgentAction(
+                tool_name="observe_page",
+                rationale=thought.rationale,
+                expected_outcome="Capture the navigated page as a structured observation.",
+                risk_level=RiskLevel.LOW,
+            )
+            return PlannerDecision(thought=thought, action=action)
+
         if observation_count == 0:
             thought = AgentThought(
                 summary="Collect an initial observation.",
@@ -66,14 +104,15 @@ class FoundationPlanner:
             parameters={
                 "status": RuntimeStatus.STOPPED.value,
                 "summary": (
-                    "Foundation bootstrap completed. The runtime captured an "
-                    "initial observation and is ready for real planner and "
-                    "Playwright integration in the next phase."
+                    "Foundation bootstrap completed. The runtime executed a real "
+                    "browser-backed bootstrap flow and captured a structured "
+                    "observation, then stopped honestly because a full planner "
+                    "is not wired yet."
                 ),
                 "next_steps": [
-                    "Replace the stub browser engine with a Playwright adapter.",
                     "Wire a real LLM planner into the runtime loop.",
-                    "Expand scenario coverage through generic skills, not scripts.",
+                    "Add more generic browser skills for richer interaction coverage.",
+                    "Improve progress detection for multi-step autonomous execution.",
                 ],
             },
             risk_level=RiskLevel.LOW,

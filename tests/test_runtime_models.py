@@ -59,7 +59,11 @@ def test_tool_result_contract_supports_structured_payloads() -> None:
         status=ToolExecutionStatus.SUCCESS,
         message="Observation completed.",
         data={"page_url": "https://example.com"},
+        artifacts=["traces/session_test.jsonl"],
+        duration_ms=42,
     )
 
     assert result.status == ToolExecutionStatus.SUCCESS
     assert result.data["page_url"] == "https://example.com"
+    assert result.artifacts == ["traces/session_test.jsonl"]
+    assert result.duration_ms == 42

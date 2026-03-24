@@ -6,8 +6,7 @@ import argparse
 import json
 from typing import Sequence
 
-from browser_agent.browser.engine import StubBrowserEngine
-from browser_agent.browser.page_state import PageState
+from browser_agent.browser.engine import PlaywrightBrowserEngine
 from browser_agent.config import RuntimeSettings
 from browser_agent.llm.planner import FoundationPlanner
 from browser_agent.runtime.loop import RuntimeLoop
@@ -39,22 +38,28 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Render the final report as JSON.",
     )
+    parser.add_argument(
+        "--headed",
+        action="store_true",
+        help="Launch the browser with a visible window.",
+    )
+    parser.add_argument(
+        "--capture-screenshots",
+        action="store_true",
+        help="Capture one screenshot artifact at each observation point.",
+    )
     return parser
 
 
-def build_initial_page_state(start_url: str | None) -> PageState:
-    """Create a small initial page snapshot for bootstrap mode."""
+def build_browser_engine(settings: RuntimeSettings) -> PlaywrightBrowserEngine:
+    """Create the real browser adapter used by the CLI runtime."""
 
-    if start_url:
-        return PageState(
-            url=start_url,
-            title="Bootstrap Session",
-            summary="Stub browser prepared for the requested starting URL.",
-            text_excerpt=f"Bootstrap mode prepared a stub browser page at {start_url}.",
-        )
-    return PageState(
-        summary="Stub browser started without an explicit starting URL.",
-        text_excerpt="Bootstrap mode is ready to capture the first observation.",
+    return PlaywrightBrowserEngine(
+        headless=settings.headless,
+        default_timeout_ms=settings.default_timeout_ms,
+        max_text_chars=settings.max_text_chars,
+        artifact_dir=settings.artifact_dir,
+        capture_screenshots=settings.capture_screenshots,
     )
 
 
@@ -77,6 +82,9 @@ def render_text_report(report: FinalReport) -> str:
         lines.extend(f"- {item}" for item in report.next_steps)
     if report.final_url:
         lines.append(f"Final URL: {report.final_url}")
+    if report.artifact_refs:
+        lines.append("Artifacts:")
+        lines.extend(f"- {item}" for item in report.artifact_refs)
     return "\n".join(lines)
 
 
@@ -90,20 +98,24 @@ def run_cli(argv: Sequence[str] | None = None) -> FinalReport:
     settings = RuntimeSettings.from_env()
     if args.max_steps is not None:
         settings = settings.model_copy(update={"max_steps": args.max_steps})
+    if args.headed:
+        settings = settings.model_copy(update={"headless": False})
+    if args.capture_screenshots:
+        settings = settings.model_copy(update={"capture_screenshots": True})
 
     task = UserTask(
         request=task_text,
         start_url=args.start_url,
     )
     session = RuntimeSession(task=task, settings=settings)
-    browser = StubBrowserEngine(initial_state=build_initial_page_state(args.start_url))
+    browser = build_browser_engine(settings)
     loop = RuntimeLoop(
         planner=FoundationPlanner(),
         skill_registry=build_default_registry(),
         browser=browser,
         safety_guardrails=SafetyGuardrails(),
         confirmation_manager=ConfirmationManager(),
-        trace_recorder=TraceRecorder(),
+        trace_recorder=TraceRecorder(trace_dir=settings.trace_dir),
     )
     report = loop.run(session)
 
