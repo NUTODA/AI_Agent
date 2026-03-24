@@ -2,7 +2,7 @@
 
 `browser-agent-foundation` is a Python-first project scaffold for an autonomous browser agent that can accept a natural-language task, operate inside a browser session, and keep running until the task is complete or it needs more input from the user.
 
-The repository now includes a real Playwright-backed browser runtime skeleton. It keeps the original architectural boundaries intact while replacing the stub browser layer with live navigation, observation, interaction, and trace collection primitives that are honest enough for demos and further planner work.
+The repository now includes a real typed planner layer, a real multi-step runtime loop, and a real Playwright-backed browser stack. The core architectural boundary remains the same: planner -> typed skills -> browser adapter.
 
 ## Goals
 
@@ -52,12 +52,13 @@ src/browser_agent/     Runtime, browser, safety, skills, and CLI packages
 tests/                 Smoke and contract tests for the foundation
 ```
 
-## Running The Foundation
+## Running The Runtime
 
 1. Create a virtual environment.
 2. Install the package with development dependencies.
 3. Install Playwright browser binaries.
-4. Run the CLI.
+4. Configure the planner.
+5. Run the CLI.
 
 ```bash
 python -m venv .venv
@@ -80,38 +81,58 @@ If the `playwright` shell command is unavailable in your environment, run the br
 python -m playwright install chromium
 ```
 
+The multi-step planner is not enabled by default. Configure it through environment variables:
+
+```bash
+export BROWSER_AGENT_PLANNER_ENABLED=true
+export BROWSER_AGENT_PLANNER_PROVIDER=openai_compatible
+export BROWSER_AGENT_PLANNER_BASE_URL=https://your-llm-endpoint/v1
+export BROWSER_AGENT_PLANNER_MODEL=your-model-name
+export BROWSER_AGENT_PLANNER_API_KEY=your-api-key
+browser-agent --start-url https://example.com "Inspect the current page"
+```
+
+If the planner is not configured, the CLI now says so explicitly instead of falling back to fake autonomy.
+
 ## Current Status
 
-Current stage: real browser runtime skeleton.
+Current stage: real multi-step planner/runtime integration.
 
 What already exists:
 
 - architecture documents and project rules;
 - typed runtime models for the agent loop and tool contracts;
+- a strict planner decision contract with structured `act`, `ask_user`, `request_confirmation`, `finish`, and `fail` outcomes;
+- a minimal OpenAI-compatible planner provider abstraction plus fake provider support for tests;
+- a strict planner parser that validates JSON, skill names, and skill arguments before runtime execution;
 - a modular skill system with a default registry;
 - a safety layer for confirmation gating;
 - a real Playwright-backed browser adapter with lifecycle management;
 - real page observation, interactive element extraction, navigation, clicking, typing, and text extraction;
-- structured execution trace artifacts with step metadata and optional screenshots;
-- smoke, contract, selector, runtime-mapping, and local browser integration tests.
+- a real multi-step observe -> plan -> guardrail -> execute -> re-observe loop;
+- deterministic progress detection and stagnation protection;
+- structured execution trace artifacts with planner decisions, progress outcomes, and optional screenshots;
+- smoke, parser, contract, selector, runtime, and local browser integration tests.
 
 What is intentionally not implemented yet:
 
-- an LLM integration that produces live decisions from prompts;
-- deep multi-step autonomous planning beyond the foundation bootstrap planner;
-- confirmation resume flows after `waiting_for_user`;
+- full conversational resume UX in the CLI after confirmation or user-question pauses;
 - persistent memory beyond the current process and trace artifacts;
+- multiple LLM provider adapters beyond the current OpenAI-compatible transport;
 - scenario execution depth for inbox, food, or job workflows.
 
 ## Demo Reality
 
-The CLI now runs a real browser session. The current demo flow is intentionally narrow and honest:
+The CLI now runs a real multi-step browser session when the planner is configured. The current demo flow is intentionally honest:
 
-- if `--start-url` is provided, the foundation planner performs one typed `navigate` action;
-- the runtime captures a real `observe_page` snapshot through Playwright;
-- the task finishes with a transparent report that explains the planner is still foundation-level.
+- the runtime performs a real observation before each planning step;
+- the planner chooses one typed atomic next step at a time;
+- the runtime executes only registered skills and re-observes after execution;
+- risky actions pause for explicit confirmation;
+- blocking ambiguity pauses for a user answer;
+- the loop stops with a final report, a confirmation request, or a blocking user question.
 
-This repository still does not claim general autonomy. The browser runtime is real; the planner remains intentionally small.
+This repository still does not claim unrestricted general autonomy. The loop is real, but it remains bounded, typed, safety-gated, and intentionally provider-minimal.
 
 ## Key Design Principles
 
@@ -132,4 +153,4 @@ This repository still does not claim general autonomy. The browser runtime is re
 
 ## Next Steps
 
-The next milestone is to replace the foundation planner with a real LLM-backed planner, expand reusable browser skills, and evolve the current browser skeleton into a multi-step autonomous runtime without introducing task-specific scripts.
+The next milestone is to improve resume UX, expand the reusable skill set, and harden planner behavior on more dynamic real-world pages without introducing task-specific scripts.

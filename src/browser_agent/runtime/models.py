@@ -1,8 +1,4 @@
-"""Typed runtime contracts for the browser agent foundation.
-
-These models define the integration surface between planning, runtime
-orchestration, skills, browser automation, safety checks, and reporting.
-"""
+"""Typed runtime contracts for the browser agent runtime."""
 
 from __future__ import annotations
 
@@ -41,6 +37,7 @@ class RuntimeStatus(str, Enum):
     PENDING = "pending"
     RUNNING = "running"
     WAITING_FOR_USER = "waiting_for_user"
+    WAITING_FOR_CONFIRMATION = "waiting_for_confirmation"
     COMPLETED = "completed"
     STOPPED = "stopped"
     FAILED = "failed"
@@ -54,6 +51,25 @@ class ToolExecutionStatus(str, Enum):
     WAITING_FOR_CONFIRMATION = "waiting_for_confirmation"
     ERROR = "error"
     SKIPPED = "skipped"
+
+
+class PlannerDecisionType(str, Enum):
+    """The only planner decisions the runtime understands."""
+
+    ACT = "act"
+    ASK_USER = "ask_user"
+    REQUEST_CONFIRMATION = "request_confirmation"
+    FINISH = "finish"
+    FAIL = "fail"
+
+
+class PlannerProgressState(str, Enum):
+    """Planner-provided progress signal used by anti-loop logic."""
+
+    UNKNOWN = "unknown"
+    NO_PROGRESS = "no_progress"
+    PARTIAL_PROGRESS = "partial_progress"
+    SUBSTANTIAL_PROGRESS = "substantial_progress"
 
 
 class InteractiveElement(BaseModel):
@@ -171,29 +187,6 @@ class ToolResult(BaseModel):
     completed_at: datetime = Field(default_factory=utc_now)
 
 
-class ExecutionTraceItem(BaseModel):
-    """Correlates observation, thought, action, and execution metadata."""
-
-    trace_id: str = Field(default_factory=lambda: new_id("trace"))
-    step_index: int
-    observation_id: str | None = None
-    thought_id: str | None = None
-    action_id: str | None = None
-    action_name: str | None = None
-    action_input: dict[str, Any] = Field(default_factory=dict)
-    status: ToolExecutionStatus | None = None
-    output_summary: str | None = None
-    duration_ms: int | None = None
-    current_url: str | None = None
-    page_title: str | None = None
-    error_message: str | None = None
-    artifacts: list[str] = Field(default_factory=list)
-    tool_call: ToolCall | None = None
-    tool_result: ToolResult | None = None
-    notes: list[str] = Field(default_factory=list)
-    recorded_at: datetime = Field(default_factory=utc_now)
-
-
 class ConfirmationRequest(BaseModel):
     """A human approval request for a risky or destructive action."""
 
@@ -205,6 +198,63 @@ class ConfirmationRequest(BaseModel):
     consequences: list[str] = Field(default_factory=list)
     prompt: str
     created_at: datetime = Field(default_factory=utc_now)
+
+
+class PendingUserQuestion(BaseModel):
+    """A user-facing question that blocks the runtime from continuing."""
+
+    question_id: str = Field(default_factory=lambda: new_id("question"))
+    question: str
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class UserResponse(BaseModel):
+    """A user answer captured for a pending runtime question."""
+
+    response_id: str = Field(default_factory=lambda: new_id("answer"))
+    question_id: str | None = None
+    answer: str
+    received_at: datetime = Field(default_factory=utc_now)
+
+
+class ProgressOutcome(BaseModel):
+    """Deterministic runtime progress signal recorded after each step."""
+
+    made_progress: bool
+    summary: str
+    signals: list[str] = Field(default_factory=list)
+    no_progress_streak: int = 0
+
+
+class ExecutionTraceItem(BaseModel):
+    """Correlates observation, thought, action, and execution metadata."""
+
+    trace_id: str = Field(default_factory=lambda: new_id("trace"))
+    step_index: int
+    observation_id: str | None = None
+    observation_summary: str | None = None
+    thought_id: str | None = None
+    action_id: str | None = None
+    action_name: str | None = None
+    action_input: dict[str, Any] = Field(default_factory=dict)
+    planner_decision_type: PlannerDecisionType | None = None
+    rationale_summary: str | None = None
+    completion_confidence: float | None = None
+    planner_progress_assessment: PlannerProgressState | None = None
+    status: ToolExecutionStatus | None = None
+    output_summary: str | None = None
+    duration_ms: int | None = None
+    current_url: str | None = None
+    page_title: str | None = None
+    error_message: str | None = None
+    artifacts: list[str] = Field(default_factory=list)
+    tool_call: ToolCall | None = None
+    tool_result: ToolResult | None = None
+    progress_outcome: ProgressOutcome | None = None
+    state_transition: str | None = None
+    report_summary: str | None = None
+    notes: list[str] = Field(default_factory=list)
+    recorded_at: datetime = Field(default_factory=utc_now)
 
 
 class FinalReport(BaseModel):
@@ -220,4 +270,9 @@ class FinalReport(BaseModel):
     trace_refs: list[str] = Field(default_factory=list)
     artifact_refs: list[str] = Field(default_factory=list)
     final_url: str | None = None
+    step_count: int = 0
+    completion_reason: str | None = None
+    failure_reason: str | None = None
+    pending_confirmation: ConfirmationRequest | None = None
+    pending_user_question: PendingUserQuestion | None = None
     generated_at: datetime = Field(default_factory=utc_now)

@@ -11,10 +11,10 @@ The runtime is responsible for advancing a user task through repeated observatio
 
 ## Core Runtime Cycle
 
-The intended control loop is:
+The runtime now implements the following control loop:
 
 ```text
-observe -> reason -> choose action -> execute -> re-observe -> finish
+observe -> plan -> maybe confirm/ask user -> execute -> re-observe -> finish
 ```
 
 Each stage has a dedicated purpose:
@@ -24,15 +24,15 @@ Each stage has a dedicated purpose:
    - summarize what is visible and actionable;
    - store the snapshot as an `AgentObservation`.
 
-2. `reason`
-   - interpret the observation in the context of the original task;
-   - derive what changed and what still blocks progress;
-   - record a structured `AgentThought`.
+2. `plan`
+   - build a typed planner context from the task, latest observation, recent trace summary, available skills, and session state;
+   - request one structured planner decision from the configured LLM provider;
+   - validate the response through the strict parser before the runtime touches any skill.
 
-3. `choose action`
-   - select the next `AgentAction`;
-   - specify the skill name, inputs, and expected outcome;
-   - include risk metadata and whether confirmation is likely required.
+3. `maybe confirm / ask user`
+   - pause if the planner asks a blocking question;
+   - pause if the planner or guardrails require confirmation for a risky action;
+   - store the pending state explicitly in the session.
 
 4. `execute`
    - resolve the action through the skill registry;
@@ -41,7 +41,8 @@ Each stage has a dedicated purpose:
 
 5. `re-observe`
    - inspect whether the action changed the page or task state;
-   - feed the result back into the next step.
+   - feed the result back into the next step;
+   - update deterministic progress signals and loop-protection counters.
 
 6. `finish`
    - stop when success, user clarification, safety gating, or runtime limits require it;
@@ -52,6 +53,8 @@ Each stage has a dedicated purpose:
 The runtime keeps an in-memory session with these main state buckets:
 
 - `task`: immutable user request and constraints;
+- `step_count`: planner-step counter;
+- `no_progress_streak`: deterministic stagnation counter;
 - `observations`: ordered list of `AgentObservation`;
 - `thoughts`: ordered list of `AgentThought`;
 - `actions`: ordered list of `AgentAction`;
@@ -59,6 +62,10 @@ The runtime keeps an in-memory session with these main state buckets:
 - `tool_results`: ordered list of `ToolResult`;
 - `trace_items`: audit-friendly combined history;
 - `pending_confirmation`: optional `ConfirmationRequest`;
+- `pending_action`: optional risky action waiting for approval;
+- `pending_user_question`: optional blocking question from the planner;
+- `user_responses`: stored answers for resume flows;
+- `execution_history_summary`: compact planner-facing trace summary;
 - `status`: current lifecycle status such as `running`, `waiting_for_user`, or `completed`.
 
 ## Observation Format
@@ -89,16 +96,23 @@ Each `AgentAction` should answer five questions:
 - what outcome is expected;
 - how risky the action is.
 
-Recommended fields:
+Current planner decision fields:
 
-- `action_id`
-- `tool_name`
+- `decision_type`
 - `rationale`
-- `parameters`
+- `chosen_skill`
+- `skill_input`
 - `expected_outcome`
 - `risk_level`
+- `destructive`
+- `completion_confidence`
+- `progress_assessment`
 - `requires_confirmation`
-- `created_at`
+- `user_question`
+- `finish_reason`
+- `failure_reason`
+
+The runtime converts acting planner decisions into typed `AgentAction` instances only after validation succeeds.
 
 ## Tool Result Format
 
@@ -121,14 +135,19 @@ The result format matters because the planner should react to structured outcome
 
 ## Trace Artifacts
 
-The runtime trace should be useful even when the planner is still limited.
+The runtime trace should stay useful even when the planner is wrong or blocked.
 
 Minimum useful trace fields:
 
+- observation summary;
+- planner decision type;
+- rationale summary;
 - action name;
 - action input;
 - output summary;
 - execution status;
+- progress outcome;
+- state transition;
 - duration;
 - timestamp;
 - current URL and page title at step time;
@@ -138,14 +157,19 @@ The current runtime writes in-memory trace items and can also persist JSONL and 
 
 ## When The Agent Asks The User
 
-The runtime must pause and ask the user for more input when:
+The runtime pauses and asks the user for more input when:
 
 - a high-risk or destructive action requires explicit approval;
 - the planner determines that critical information is missing;
 - the page asks for credentials, payment, or ambiguous user intent;
 - the current observation is insufficient to continue safely.
 
-The runtime should represent these pauses explicitly rather than as failures. The expected mechanism is a `ConfirmationRequest` or a question surfaced in the `FinalReport`.
+The runtime represents these pauses explicitly rather than as hidden failures. The current contracts support internal resume entrypoints for:
+
+- continue after confirmation approval or rejection;
+- continue after a user answer to a pending question.
+
+Full conversational CLI resume is still a later stage.
 
 ## How The Agent Decides The Task Is Finished
 
@@ -153,8 +177,8 @@ Completion should come from explicit evidence, not from a guessed scenario end s
 
 The agent can finish when:
 
-- a `finish_task` skill is chosen with clear rationale;
-- the planner determines that the user goal has been satisfied;
+- the planner emits a `finish` decision with clear rationale and enough evidence;
+- the runtime turns that decision into the typed `finish_task` skill;
 - the task cannot continue without a new user instruction;
 - the system must stop due to safety or platform limitations and report the reason.
 
@@ -169,12 +193,12 @@ The final report should summarize:
 
 Autonomous browser agents are vulnerable to unproductive loops, so the runtime must guard against them.
 
-Minimum protections:
+Current protections:
 
 - `max_steps`: hard cap on execution steps;
-- repeated-observation detection when the same page state appears without progress;
-- repeated-action detection when the same action fails or no longer changes the state;
-- confirmation timeout or unresolved-wait timeout;
+- deterministic progress detection from URL/title/text/interactive-element changes;
+- repeated-action detection when the same action is selected without progress;
+- planner-failure degradation into a controlled failure state;
 - graceful stop with a report instead of silent stalling.
 
 Recommended stop triggers:
@@ -197,16 +221,24 @@ Typical failure categories:
 - safety block;
 - loop exhaustion.
 
-Failures should produce structured errors and preserve enough trace data for debugging.
+Failures produce structured errors and preserve enough trace data for debugging.
 
-## Bootstrap Reality Of This Repository
+## Current Reality Of This Repository
 
-This repository now implements a real browser-backed runtime skeleton, not the final autonomous system. That means:
+This repository now implements a real typed multi-step agent loop. That means:
 
-- the loop skeleton is present and executes typed skills against a real Playwright adapter;
-- the planner interface is defined, but the default planner is still a transparent bootstrap planner;
+- the runtime performs a real observation before planner decisions;
+- the planner produces a strict structured decision instead of free-form text;
+- malformed planner output degrades into a controlled failure instead of a crash;
 - the browser adapter can start a browser, navigate, observe, click, type, and extract text;
+- risky actions pause in `waiting_for_confirmation`;
+- missing information pauses in `waiting_for_user`;
 - trace items and optional browser artifacts are real;
-- the code still intentionally avoids pretending that full autonomy already exists.
+- the code still intentionally avoids pretending that unrestricted autonomy already exists.
 
-The purpose of the current runtime is to make the next implementation phases straightforward, safe, observable, and demo-ready without hardcoded scenario logic.
+Remaining limitations:
+
+- the CLI does not yet provide a full interactive resume flow after pauses;
+- persistence is still limited to the current process plus trace artifacts;
+- only one provider adapter is currently implemented;
+- the runtime still depends on the current reusable skill set and does not invent new capabilities on demand.

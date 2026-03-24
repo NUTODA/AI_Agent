@@ -1,4 +1,4 @@
-"""Tests for runtime loop mapping from browser results to tool results."""
+"""Runtime-loop tests for the structured multi-step agent."""
 
 from __future__ import annotations
 
@@ -7,30 +7,95 @@ from browser_agent.browser.page_state import PageState
 from browser_agent.config import RuntimeSettings
 from browser_agent.llm.planner import PlannerDecision
 from browser_agent.runtime.loop import RuntimeLoop
-from browser_agent.runtime.models import AgentAction, AgentThought, RiskLevel, RuntimeStatus, ToolExecutionStatus, UserTask
+from browser_agent.runtime.models import (
+    PlannerDecisionType,
+    PlannerProgressState,
+    RiskLevel,
+    RuntimeStatus,
+    ToolExecutionStatus,
+    UserTask,
+)
 from browser_agent.runtime.session import RuntimeSession
 from browser_agent.runtime.trace import TraceRecorder
-from browser_agent.safety.confirmations import ConfirmationManager
+from browser_agent.safety.confirmations import ConfirmationDecision, ConfirmationManager
 from browser_agent.safety.guardrails import SafetyGuardrails
 from browser_agent.skills.registry import build_default_registry
+
+
+def act_decision(
+    *,
+    skill: str,
+    skill_input: dict[str, object],
+    rationale: str,
+    expected_outcome: str,
+    risk_level: RiskLevel = RiskLevel.LOW,
+    destructive: bool = False,
+    requires_confirmation: bool = False,
+    progress_assessment: PlannerProgressState = PlannerProgressState.PARTIAL_PROGRESS,
+) -> PlannerDecision:
+    return PlannerDecision(
+        decision_type=PlannerDecisionType.ACT,
+        rationale=rationale,
+        chosen_skill=skill,
+        skill_input=skill_input,
+        expected_outcome=expected_outcome,
+        risk_level=risk_level,
+        destructive=destructive,
+        requires_confirmation=requires_confirmation,
+        completion_confidence=0.6,
+        progress_assessment=progress_assessment,
+    )
+
+
+def finish_decision(reason: str) -> PlannerDecision:
+    return PlannerDecision(
+        decision_type=PlannerDecisionType.FINISH,
+        rationale="The task now has enough evidence to stop.",
+        finish_reason=reason,
+        completion_confidence=0.9,
+        progress_assessment=PlannerProgressState.SUBSTANTIAL_PROGRESS,
+    )
+
+
+class QueuePlanner:
+    """Return pre-seeded planner decisions in sequence."""
+
+    def __init__(self, decisions: list[PlannerDecision]) -> None:
+        self.decisions = list(decisions)
+
+    def decide(self, planner_context) -> PlannerDecision:
+        del planner_context
+        if not self.decisions:
+            return PlannerDecision.safe_fail("Planner queue is empty.")
+        return self.decisions.pop(0)
+
+
+class AskThenFinishPlanner:
+    """Ask for a user answer once, then finish."""
+
+    def decide(self, planner_context) -> PlannerDecision:
+        if not planner_context.session_state.user_responses:
+            return PlannerDecision(
+                decision_type=PlannerDecisionType.ASK_USER,
+                rationale="The target account is ambiguous.",
+                user_question="Which account should the agent use?",
+                completion_confidence=0.2,
+                progress_assessment=PlannerProgressState.NO_PROGRESS,
+            )
+        return finish_decision("The agent received the blocking user clarification.")
 
 
 class SingleActionPlanner:
     """Planner that emits one failing click action."""
 
-    def decide(self, session_summary: dict[str, object]) -> PlannerDecision:
-        return PlannerDecision(
-            thought=AgentThought(
-                summary="Attempt a click.",
-                rationale="Exercise browser-result to ToolResult error mapping.",
-            ),
-            action=AgentAction(
-                tool_name="click_element",
-                rationale="Trigger a failing click for the mapping test.",
-                parameters={"selector": 'text="Missing"'},
-                expected_outcome="The runtime should surface a structured failure.",
-                risk_level=RiskLevel.LOW,
-            ),
+    def decide(self, planner_context) -> PlannerDecision:
+        del planner_context
+        return act_decision(
+            skill="click_element",
+            skill_input={"selector": 'text="Missing"'},
+            rationale="Trigger a failing click for the mapping test.",
+            expected_outcome="The runtime should surface a structured failure.",
+            progress_assessment=PlannerProgressState.NO_PROGRESS,
         )
 
 
@@ -47,6 +112,29 @@ class FailingClickBrowser(StubBrowserEngine):
             error_code="selector_not_found",
             error_message="No matching element was visible on the page.",
         )
+
+
+class NoProgressBrowser(StubBrowserEngine):
+    """Stub browser that returns success without changing the page state."""
+
+    def click(self, target: str) -> BrowserOperationResult:
+        page_state = self.observe_page()
+        return BrowserOperationResult(
+            message=f"Clicked {target}.",
+            page_state=page_state,
+            metadata={"resolved_target": target},
+        )
+
+
+def build_loop(*, planner, browser, trace_dir) -> RuntimeLoop:
+    return RuntimeLoop(
+        planner=planner,
+        skill_registry=build_default_registry(),
+        browser=browser,
+        safety_guardrails=SafetyGuardrails(),
+        confirmation_manager=ConfirmationManager(),
+        trace_recorder=TraceRecorder(trace_dir=trace_dir),
+    )
 
 
 def test_runtime_loop_maps_browser_failure_into_structured_tool_result(tmp_path) -> None:
@@ -66,13 +154,10 @@ def test_runtime_loop_maps_browser_failure_into_structured_tool_result(tmp_path)
             text_excerpt="No matching button is visible.",
         )
     )
-    loop = RuntimeLoop(
+    loop = build_loop(
         planner=SingleActionPlanner(),
-        skill_registry=build_default_registry(),
         browser=browser,
-        safety_guardrails=SafetyGuardrails(),
-        confirmation_manager=ConfirmationManager(),
-        trace_recorder=TraceRecorder(trace_dir=settings.trace_dir),
+        trace_dir=settings.trace_dir,
     )
 
     report = loop.run(session)
@@ -85,4 +170,229 @@ def test_runtime_loop_maps_browser_failure_into_structured_tool_result(tmp_path)
     ]
     assert session.latest_observation is not None
     assert session.latest_observation.page_title == "Dashboard"
+    assert session.trace_items[0].planner_decision_type == PlannerDecisionType.ACT
     assert any(path.suffix == ".jsonl" for path in settings.trace_dir.iterdir())
+
+
+def test_runtime_loop_executes_multiple_steps_and_finishes(tmp_path) -> None:
+    settings = RuntimeSettings(
+        trace_dir=tmp_path / "traces",
+        artifact_dir=tmp_path / "artifacts",
+        max_steps=6,
+    )
+    session = RuntimeSession(
+        task=UserTask(
+            request="Navigate and inspect the dashboard",
+            start_url="https://example.com/dashboard",
+        ),
+        settings=settings,
+    )
+    planner = QueuePlanner(
+        [
+            act_decision(
+                skill="navigate",
+                skill_input={"url": "https://example.com/dashboard", "wait_for": "load"},
+                rationale="The requested start URL is the next safe atomic step.",
+                expected_outcome="The dashboard page loads in the browser.",
+            ),
+            act_decision(
+                skill="extract_page_text",
+                skill_input={"max_chars": 250},
+                rationale="Read the current page text before finishing.",
+                expected_outcome="The runtime captures bounded visible text from the page.",
+            ),
+            finish_decision("The dashboard page was loaded and its visible text was read."),
+        ]
+    )
+    loop = build_loop(
+        planner=planner,
+        browser=StubBrowserEngine(),
+        trace_dir=settings.trace_dir,
+    )
+
+    report = loop.run(session)
+
+    assert report.status == RuntimeStatus.COMPLETED
+    assert report.completed is True
+    assert report.step_count == 3
+    assert [action.tool_name for action in session.actions] == [
+        "navigate",
+        "extract_page_text",
+        "finish_task",
+    ]
+    assert session.latest_observation is not None
+    assert session.latest_observation.page_url == "https://example.com/dashboard"
+    assert len(session.trace_items) == 3
+    assert session.trace_items[-1].report_summary == report.summary
+    assert all(item.planner_decision_type is not None for item in session.trace_items)
+
+
+def test_runtime_loop_transitions_to_waiting_for_confirmation_and_can_resume(
+    tmp_path,
+) -> None:
+    settings = RuntimeSettings(
+        trace_dir=tmp_path / "traces",
+        artifact_dir=tmp_path / "artifacts",
+        max_steps=5,
+    )
+    session = RuntimeSession(
+        task=UserTask(request="Delete the selected record"),
+        settings=settings,
+    )
+    planner = QueuePlanner(
+        [
+            act_decision(
+                skill="click_element",
+                skill_input={"selector": 'text="Delete"'},
+                rationale="This click appears to delete the selected record.",
+                expected_outcome="Delete the selected record from the current page.",
+                risk_level=RiskLevel.HIGH,
+                destructive=True,
+                requires_confirmation=True,
+                progress_assessment=PlannerProgressState.NO_PROGRESS,
+            ),
+            finish_decision("The confirmed click was executed and the step can stop."),
+        ]
+    )
+    loop = build_loop(
+        planner=planner,
+        browser=StubBrowserEngine(),
+        trace_dir=settings.trace_dir,
+    )
+
+    paused_report = loop.run(session)
+
+    assert paused_report.status == RuntimeStatus.WAITING_FOR_CONFIRMATION
+    assert session.pending_confirmation is not None
+    assert session.pending_action is not None
+    assert session.tool_results[0].status == ToolExecutionStatus.WAITING_FOR_CONFIRMATION
+
+    resumed_report = loop.continue_after_confirmation(
+        session,
+        ConfirmationDecision(
+            request_id=session.pending_confirmation.request_id,
+            approved=True,
+        ),
+    )
+
+    assert resumed_report.status == RuntimeStatus.COMPLETED
+    assert session.pending_confirmation is None
+    assert [action.tool_name for action in session.actions] == [
+        "click_element",
+        "finish_task",
+    ]
+
+
+def test_runtime_loop_transitions_to_waiting_for_user_and_can_resume(tmp_path) -> None:
+    settings = RuntimeSettings(
+        trace_dir=tmp_path / "traces",
+        artifact_dir=tmp_path / "artifacts",
+        max_steps=4,
+    )
+    session = RuntimeSession(
+        task=UserTask(request="Choose the account and stop"),
+        settings=settings,
+    )
+    loop = build_loop(
+        planner=AskThenFinishPlanner(),
+        browser=StubBrowserEngine(),
+        trace_dir=settings.trace_dir,
+    )
+
+    paused_report = loop.run(session)
+
+    assert paused_report.status == RuntimeStatus.WAITING_FOR_USER
+    assert session.pending_user_question is not None
+    assert session.trace_items[0].planner_decision_type == PlannerDecisionType.ASK_USER
+
+    resumed_report = loop.continue_after_user_answer(session, "Use account A.")
+
+    assert resumed_report.status == RuntimeStatus.COMPLETED
+    assert session.pending_user_question is None
+    assert session.latest_user_response is not None
+    assert session.latest_user_response.answer == "Use account A."
+
+
+def test_runtime_loop_stops_after_multiple_no_progress_steps(tmp_path) -> None:
+    settings = RuntimeSettings(
+        trace_dir=tmp_path / "traces",
+        artifact_dir=tmp_path / "artifacts",
+        max_steps=5,
+        max_no_progress_steps=2,
+    )
+    session = RuntimeSession(
+        task=UserTask(request="Keep clicking a stuck button"),
+        settings=settings,
+    )
+    planner = QueuePlanner(
+        [
+            act_decision(
+                skill="click_element",
+                skill_input={"selector": 'text="Retry"'},
+                rationale="Try the button again.",
+                expected_outcome="The page should change after the click.",
+                progress_assessment=PlannerProgressState.NO_PROGRESS,
+            ),
+            act_decision(
+                skill="click_element",
+                skill_input={"selector": 'text="Retry"'},
+                rationale="Try the same button again after no visible change.",
+                expected_outcome="The page should change after the click.",
+                progress_assessment=PlannerProgressState.NO_PROGRESS,
+            ),
+        ]
+    )
+    loop = build_loop(
+        planner=planner,
+        browser=NoProgressBrowser(
+            initial_state=PageState(
+                url="https://example.com/retry",
+                title="Retry Page",
+                summary="Retry page with no visible state changes.",
+                text_excerpt="Retry again.",
+            )
+        ),
+        trace_dir=settings.trace_dir,
+    )
+
+    report = loop.run(session)
+
+    assert report.status == RuntimeStatus.FAILED
+    assert "without observable progress" in report.summary.lower()
+    assert session.no_progress_streak >= 2
+    assert session.trace_items[-1].progress_outcome is not None
+    assert session.trace_items[-1].progress_outcome.made_progress is False
+
+
+def test_runtime_loop_honors_explicit_fail_decision(tmp_path) -> None:
+    settings = RuntimeSettings(
+        trace_dir=tmp_path / "traces",
+        artifact_dir=tmp_path / "artifacts",
+    )
+    session = RuntimeSession(
+        task=UserTask(request="Complete an impossible task"),
+        settings=settings,
+    )
+    planner = QueuePlanner(
+        [
+            PlannerDecision(
+                decision_type=PlannerDecisionType.FAIL,
+                rationale="The task cannot continue honestly.",
+                failure_reason="The required data is unavailable on the page.",
+                completion_confidence=0.1,
+                progress_assessment=PlannerProgressState.NO_PROGRESS,
+            )
+        ]
+    )
+    loop = build_loop(
+        planner=planner,
+        browser=StubBrowserEngine(),
+        trace_dir=settings.trace_dir,
+    )
+
+    report = loop.run(session)
+
+    assert report.status == RuntimeStatus.FAILED
+    assert report.failure_reason == "The required data is unavailable on the page."
+    assert not session.actions
+    assert session.trace_items[0].planner_decision_type == PlannerDecisionType.FAIL

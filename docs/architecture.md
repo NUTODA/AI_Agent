@@ -29,7 +29,11 @@ flowchart TD
     User[User] --> Cli[CLI]
     Cli --> Session[RuntimeSession]
     Session --> Loop[AgentLoop]
-    Loop --> Planner[Planner]
+    Loop --> PlannerContext[PlannerContext]
+    PlannerContext --> Planner[Planner]
+    Planner --> Provider[LLMProvider]
+    Provider --> Parser[StructuredParser]
+    Parser --> Loop
     Loop --> Registry[SkillRegistry]
     Loop --> Safety[SafetyGuardrails]
     Registry --> Skills[RuntimeSkills]
@@ -64,10 +68,10 @@ Purpose:
 - orchestrate the autonomous control cycle.
 
 Responsibilities:
-- maintain the high-level loop `observe -> reason -> choose -> execute -> re-observe`;
+- maintain the high-level loop `observe -> plan -> guardrail -> execute -> re-observe`;
 - keep step counters and stop conditions;
 - coordinate planner, skill registry, safety checks, and trace recorder;
-- produce the final report or a confirmation request handoff.
+- produce the final report or a confirmation/user-input handoff.
 
 Out of scope:
 - direct Playwright calls;
@@ -82,8 +86,9 @@ Purpose:
 Responsibilities:
 - hold the original `UserTask`;
 - persist observation, thought, action, and tool-result history;
-- expose concise state summaries to the planner;
-- keep pending confirmation requests and execution metadata.
+- expose typed planner context objects instead of loose dict summaries;
+- keep pending confirmation requests, pending user questions, no-progress state, and execution metadata;
+- prepare resume-ready state for continuing after confirmation or user input.
 
 Out of scope:
 - persistent storage beyond the current process;
@@ -96,15 +101,33 @@ Purpose:
 - transform the current task context and session state into the next typed decision.
 
 Responsibilities:
-- inspect the latest observation and execution history;
-- produce an `AgentThought`;
-- propose the next `AgentAction` or signal that the user must answer a question;
-- explain why the chosen action is appropriate.
+- inspect the latest observation and execution history summary;
+- produce one strict `PlannerDecision`;
+- choose only one next atomic step from the registered skill space;
+- explain why the chosen step is appropriate and how much progress it represents;
+- signal `ask_user`, `request_confirmation`, `finish`, or `fail` when action execution would be unsafe or dishonest.
 
 Out of scope:
 - bypassing safety checks;
 - invoking browser APIs directly;
-- hardcoded scenario branches.
+- hardcoded scenario branches;
+- inventing tools that do not exist in the registry.
+
+### LLM Provider And Parser
+
+Purpose:
+- isolate model transport and response validation from planner and runtime logic.
+
+Responsibilities:
+- send the planner prompt to the configured provider;
+- request JSON-only output from the provider;
+- validate the returned payload against the strict planner decision contract;
+- reject unknown skill names or invalid skill arguments before runtime execution.
+
+Out of scope:
+- browser control;
+- skill execution;
+- task-specific orchestration.
 
 ### Browser Adapter
 
@@ -189,13 +212,14 @@ Out of scope:
 
 1. The operator provides a `UserTask`.
 2. The CLI creates a `RuntimeSession`.
-3. The runtime loop asks the planner for the next step based on session state.
-4. The planner emits a typed action.
-5. The safety layer classifies the action before execution.
-6. If approved, the runtime resolves the action to a registered skill.
-7. The skill interacts with the browser adapter or other runtime services.
-8. The result is recorded as a trace item, persisted to trace artifacts when configured, and stored in the session.
-9. The loop continues until the task completes or needs user input.
+3. The runtime observes the current browser state through the `observe_page` skill.
+4. The runtime builds a typed `PlannerContext`.
+5. The planner calls an LLM provider and receives a strict parsed `PlannerDecision`.
+6. If the decision is `act`, the safety layer classifies the action before execution.
+7. If approved, the runtime resolves the action to a registered skill.
+8. The skill interacts with the browser adapter or other runtime services.
+9. The runtime records the observation, planner decision, skill result, progress outcome, and state transition in the trace.
+10. The loop re-observes, updates progress state, and continues until the task completes, fails, or pauses for confirmation/user input.
 
 ## Responsibility Boundaries
 
@@ -203,7 +227,7 @@ To keep the system maintainable, these boundaries are strict:
 
 - `runtime` can orchestrate but should not implement Playwright logic.
 - `browser` can automate the page but should not decide what to do next.
-- `llm` can plan and parse, but it cannot bypass typed contracts.
+- `llm` can plan and parse, but it cannot bypass typed contracts or browser boundaries.
 - `skills` can execute one unit of work, but they should not embed multi-step workflows.
 - `safety` can block or request confirmation, but it should not mutate browser state.
 - `cli` can render state, but it should not contain execution policies.

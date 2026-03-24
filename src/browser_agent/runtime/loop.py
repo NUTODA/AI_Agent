@@ -1,23 +1,32 @@
-"""Runtime orchestration loop for the browser agent foundation."""
+"""Runtime orchestration loop for the browser agent."""
 
 from __future__ import annotations
 
 from time import perf_counter
 
 from browser_agent.browser.engine import BrowserEngine
-from browser_agent.llm.planner import Planner
+from browser_agent.llm.planner import (
+    Planner,
+    PlannerDecision,
+    describe_skill_registry,
+)
 from browser_agent.runtime.models import (
     AgentAction,
     AgentObservation,
     FinalReport,
+    PendingUserQuestion,
+    PlannerDecisionType,
+    PlannerProgressState,
+    ProgressOutcome,
     RuntimeStatus,
     ToolCall,
     ToolExecutionStatus,
     ToolResult,
 )
+from browser_agent.runtime.progress import ProgressDetector
 from browser_agent.runtime.session import RuntimeSession
 from browser_agent.runtime.trace import TraceRecorder
-from browser_agent.safety.confirmations import ConfirmationManager
+from browser_agent.safety.confirmations import ConfirmationDecision, ConfirmationManager
 from browser_agent.safety.guardrails import SafetyGuardrails
 from browser_agent.skills.base import SkillContext, SkillExecutionError
 from browser_agent.skills.registry import SkillRegistry
@@ -35,6 +44,7 @@ class RuntimeLoop:
         safety_guardrails: SafetyGuardrails,
         confirmation_manager: ConfirmationManager,
         trace_recorder: TraceRecorder,
+        progress_detector: ProgressDetector | None = None,
     ) -> None:
         self.planner = planner
         self.skill_registry = skill_registry
@@ -42,256 +52,622 @@ class RuntimeLoop:
         self.safety_guardrails = safety_guardrails
         self.confirmation_manager = confirmation_manager
         self.trace_recorder = trace_recorder
+        self.progress_detector = progress_detector or ProgressDetector()
+        self.available_skills = describe_skill_registry(skill_registry)
 
     def run(self, session: RuntimeSession) -> FinalReport:
         """Execute the runtime loop until completion or a controlled stop."""
 
+        if session.pending_confirmation is not None and session.final_report is not None:
+            return session.final_report
+        if session.pending_user_question is not None and session.final_report is not None:
+            return session.final_report
+        return self._run_loop(session)
+
+    def continue_after_confirmation(
+        self,
+        session: RuntimeSession,
+        decision: ConfirmationDecision,
+    ) -> FinalReport:
+        """Resume execution after the operator answered a confirmation request."""
+
+        approved_action = session.continue_after_confirmation(decision)
+        if approved_action is None:
+            report = FinalReport(
+                session_id=session.session_id,
+                status=RuntimeStatus.STOPPED,
+                summary="Execution stopped because the operator rejected the action.",
+                completed=False,
+                actions_taken=self._actions_taken(session),
+                next_steps=[
+                    "Provide a different instruction or restart the task with a safer goal."
+                ],
+                trace_refs=self._trace_refs(session),
+                artifact_refs=self._artifact_refs(session),
+                final_url=self._final_url(session),
+                step_count=session.step_count,
+                failure_reason=session.failure_reason,
+            )
+            return session.complete(report)
+
+        resumed_decision = PlannerDecision(
+            decision_type=PlannerDecisionType.ACT,
+            rationale=approved_action.rationale,
+            chosen_skill=approved_action.tool_name,
+            skill_input=approved_action.parameters,
+            expected_outcome=approved_action.expected_outcome,
+            risk_level=approved_action.risk_level,
+            destructive=approved_action.destructive,
+            completion_confidence=0.5,
+            progress_assessment=PlannerProgressState.PARTIAL_PROGRESS,
+        )
+        return self._run_loop(
+            session,
+            resumed_action=approved_action,
+            resumed_decision=resumed_decision,
+            resumed_notes=["Continued after explicit operator confirmation."],
+        )
+
+    def continue_after_user_answer(
+        self,
+        session: RuntimeSession,
+        answer: str,
+    ) -> FinalReport:
+        """Resume execution after the operator answered a blocking question."""
+
+        session.continue_after_user_answer(answer)
+        return self._run_loop(session)
+
+    def _run_loop(
+        self,
+        session: RuntimeSession,
+        *,
+        resumed_action: AgentAction | None = None,
+        resumed_decision: PlannerDecision | None = None,
+        resumed_notes: list[str] | None = None,
+    ) -> FinalReport:
         session.start()
         self.trace_recorder.bind_session(session.session_id)
 
         try:
             self.browser.start()
         except Exception as exc:
-            report = FinalReport(
-                session_id=session.session_id,
-                status=RuntimeStatus.FAILED,
-                summary="Runtime failed before the browser session became available.",
-                completed=False,
-                actions_taken=self._actions_taken(session),
-                next_steps=self._startup_next_steps(exc),
-                trace_refs=self._trace_refs(session),
-                artifact_refs=self._artifact_refs(session),
-                final_url=self._final_url(session),
-            )
-            return session.complete(report)
+            return session.complete(self._startup_failure_report(session, exc))
 
         try:
-            for step_index in range(session.settings.max_steps):
-                decision = self.planner.decide(session.summary())
-                session.add_thought(decision.thought)
-
-                if decision.user_question:
-                    report = FinalReport(
-                        session_id=session.session_id,
-                        status=RuntimeStatus.WAITING_FOR_USER,
-                        summary="The runtime requires more information from the user.",
-                        completed=False,
-                        actions_taken=self._actions_taken(session),
-                        open_questions=[decision.user_question],
-                        trace_refs=self._trace_refs(session),
-                        artifact_refs=self._artifact_refs(session),
-                        final_url=self._final_url(session),
-                    )
-                    return session.complete(report)
-
-                action = decision.action
-                if action is None:
-                    report = FinalReport(
-                        session_id=session.session_id,
-                        status=RuntimeStatus.STOPPED,
-                        summary="Planner returned no next action.",
-                        completed=False,
-                        actions_taken=self._actions_taken(session),
-                        trace_refs=self._trace_refs(session),
-                        artifact_refs=self._artifact_refs(session),
-                        final_url=self._final_url(session),
-                    )
-                    return session.complete(report)
-
-                if self._is_repeated_action(action, session):
-                    report = FinalReport(
-                        session_id=session.session_id,
-                        status=RuntimeStatus.STOPPED,
-                        summary=(
-                            "The runtime stopped to avoid repeating the same action "
-                            "without progress."
-                        ),
-                        completed=False,
-                        actions_taken=self._actions_taken(session),
-                        next_steps=[
-                            "Inspect the planner output and browser state transition logic."
-                        ],
-                        trace_refs=self._trace_refs(session),
-                        artifact_refs=self._artifact_refs(session),
-                        final_url=self._final_url(session),
-                    )
-                    return session.complete(report)
-
-                session.add_action(action)
-                tool_call = ToolCall(
-                    action_id=action.action_id,
-                    skill_name=action.tool_name,
-                    arguments=action.parameters,
+            if resumed_action is not None and resumed_decision is not None:
+                pre_observation = self._observe_current_page(session)
+                resumed_report = self._execute_action_step(
+                    session=session,
+                    step_index=session.step_count,
+                    observation_before=pre_observation,
+                    decision=resumed_decision,
+                    action=resumed_action,
+                    record_action=False,
+                    notes=resumed_notes or [],
                 )
-                session.add_tool_call(tool_call)
+                if resumed_report is not None:
+                    return resumed_report
+
+            while session.step_count < session.settings.max_steps:
+                step_index = session.step_count
+                try:
+                    observation_before = self._observe_current_page(session)
+                except Exception as exc:
+                    report = FinalReport(
+                        session_id=session.session_id,
+                        status=RuntimeStatus.FAILED,
+                        summary="Runtime failed while observing the current page.",
+                        completed=False,
+                        actions_taken=self._actions_taken(session),
+                        next_steps=["Inspect the browser observation failure and trace."],
+                        trace_refs=self._trace_refs(session),
+                        artifact_refs=self._artifact_refs(session),
+                        final_url=self._final_url(session),
+                        step_count=session.step_count,
+                        failure_reason=str(exc),
+                    )
+                    return session.complete(report)
+                planner_context = session.build_planner_context(
+                    available_skills=self.available_skills,
+                )
+                try:
+                    decision = self.planner.decide(planner_context)
+                except Exception as exc:
+                    decision = PlannerDecision.safe_fail(
+                        f"Planner raised an unexpected exception: {exc}"
+                    )
+                thought = decision.to_agent_thought()
+                session.add_thought(thought)
+
+                if decision.decision_type == PlannerDecisionType.ASK_USER:
+                    return self._handle_ask_user(
+                        session=session,
+                        step_index=step_index,
+                        observation=observation_before,
+                        thought=thought,
+                        decision=decision,
+                    )
+
+                if decision.decision_type == PlannerDecisionType.FAIL:
+                    return self._handle_planner_failure(
+                        session=session,
+                        step_index=step_index,
+                        observation=observation_before,
+                        thought=thought,
+                        decision=decision,
+                    )
+
+                if decision.decision_type == PlannerDecisionType.FINISH:
+                    return self._execute_action_step(
+                        session=session,
+                        step_index=step_index,
+                        observation_before=observation_before,
+                        decision=decision,
+                        action=decision.to_finish_action(),
+                    ) or self._build_stopped_report(
+                        session,
+                        "The runtime stopped without a final report after finish_task.",
+                    )
+
+                action = decision.to_agent_action()
+                if self._is_repeated_action_without_progress(action, session):
+                    return self._handle_repeated_action_stop(
+                        session=session,
+                        step_index=step_index,
+                        observation=observation_before,
+                        thought=thought,
+                        decision=decision,
+                        action=action,
+                    )
 
                 guardrail_decision = self.safety_guardrails.classify_action(action)
-                if guardrail_decision.requires_confirmation:
-                    request = self.confirmation_manager.build_request(
-                        action,
+                if (
+                    decision.decision_type == PlannerDecisionType.REQUEST_CONFIRMATION
+                    or guardrail_decision.requires_confirmation
+                ):
+                    return self._pause_for_confirmation(
+                        session=session,
+                        step_index=step_index,
+                        observation=observation_before,
+                        thought=thought,
+                        decision=decision,
+                        action=action,
                         reason=guardrail_decision.reason,
                         consequences=guardrail_decision.matched_signals,
                     )
-                    session.set_pending_confirmation(request)
-                    tool_result = ToolResult(
-                        call_id=tool_call.call_id,
-                        skill_name=tool_call.skill_name,
-                        status=ToolExecutionStatus.WAITING_FOR_CONFIRMATION,
-                        message=guardrail_decision.reason,
-                        data={"confirmation_request": request.model_dump(mode="json")},
-                        duration_ms=0,
-                    )
-                    session.add_tool_result(tool_result)
-                    trace_item = self.trace_recorder.record(
-                        step_index=step_index,
-                        observation=session.latest_observation,
-                        thought=decision.thought,
-                        action=action,
-                        tool_call=tool_call,
-                        tool_result=tool_result,
-                        notes=guardrail_decision.matched_signals,
-                    )
-                    session.add_trace_item(trace_item)
-                    report = FinalReport(
-                        session_id=session.session_id,
-                        status=RuntimeStatus.WAITING_FOR_USER,
-                        summary=(
-                            f"Waiting for confirmation before `{action.tool_name}` can run."
-                        ),
-                        completed=False,
-                        actions_taken=self._actions_taken(session),
-                        open_questions=[request.prompt],
-                        next_steps=["Approve or reject the pending confirmation request."],
-                        trace_refs=self._trace_refs(session),
-                        artifact_refs=self._artifact_refs(session),
-                        final_url=self._final_url(session),
-                    )
-                    return session.complete(report)
 
-                step_started = perf_counter()
-                try:
-                    skill = self.skill_registry.get(action.tool_name)
-                    payload = skill.validate_input(action.parameters)
-                    output_payload = skill.execute(self._context(session), payload)
-                    output_data = output_payload.model_dump(mode="json")
-                    tool_result = ToolResult(
-                        call_id=tool_call.call_id,
-                        skill_name=tool_call.skill_name,
-                        status=ToolExecutionStatus.SUCCESS,
-                        message=self._tool_result_message(action.tool_name, output_data),
-                        data=output_data,
-                        artifacts=self._extract_artifacts(output_data),
-                        duration_ms=self._elapsed_ms(step_started),
-                    )
-                except SkillExecutionError as exc:
-                    tool_result = ToolResult(
-                        call_id=tool_call.call_id,
-                        skill_name=tool_call.skill_name,
-                        status=ToolExecutionStatus.ERROR,
-                        message=exc.message,
-                        data=exc.data,
-                        artifacts=exc.artifacts,
-                        error_code=exc.error_code,
-                        error_message=exc.message,
-                        duration_ms=self._elapsed_ms(step_started),
-                    )
-                    session.add_tool_result(tool_result)
-                    observation = self._extract_observation(tool_result)
-                    if observation is not None:
-                        session.add_observation(observation)
-                    trace_item = self.trace_recorder.record(
-                        step_index=step_index,
-                        observation=observation or session.latest_observation,
-                        thought=decision.thought,
-                        action=action,
-                        tool_call=tool_call,
-                        tool_result=tool_result,
-                        notes=[
-                            "Execution stopped because a skill returned a structured failure."
-                        ],
-                    )
-                    session.add_trace_item(trace_item)
-                    report = FinalReport(
-                        session_id=session.session_id,
-                        status=RuntimeStatus.FAILED,
-                        summary=f"Runtime failed while executing `{action.tool_name}`.",
-                        completed=False,
-                        actions_taken=self._actions_taken(session),
-                        next_steps=["Inspect the structured tool result and trace artifacts."],
-                        trace_refs=self._trace_refs(session),
-                        artifact_refs=self._artifact_refs(session),
-                        final_url=self._final_url(session),
-                    )
-                    return session.complete(report)
-                except Exception as exc:
-                    tool_result = ToolResult(
-                        call_id=tool_call.call_id,
-                        skill_name=tool_call.skill_name,
-                        status=ToolExecutionStatus.ERROR,
-                        message=f"Skill `{action.tool_name}` failed.",
-                        error_code="skill_execution_error",
-                        error_message=str(exc),
-                        duration_ms=self._elapsed_ms(step_started),
-                    )
-                    session.add_tool_result(tool_result)
-                    trace_item = self.trace_recorder.record(
-                        step_index=step_index,
-                        observation=session.latest_observation,
-                        thought=decision.thought,
-                        action=action,
-                        tool_call=tool_call,
-                        tool_result=tool_result,
-                        notes=["Execution stopped because a skill raised an exception."],
-                    )
-                    session.add_trace_item(trace_item)
-                    report = FinalReport(
-                        session_id=session.session_id,
-                        status=RuntimeStatus.FAILED,
-                        summary=f"Runtime failed while executing `{action.tool_name}`.",
-                        completed=False,
-                        actions_taken=self._actions_taken(session),
-                        next_steps=["Inspect the tool result error and trace item."],
-                        trace_refs=self._trace_refs(session),
-                        artifact_refs=self._artifact_refs(session),
-                        final_url=self._final_url(session),
-                    )
-                    return session.complete(report)
-
-                session.add_tool_result(tool_result)
-                observation = self._extract_observation(tool_result)
-                if observation is not None:
-                    session.add_observation(observation)
-
-                trace_item = self.trace_recorder.record(
+                report = self._execute_action_step(
+                    session=session,
                     step_index=step_index,
-                    observation=observation or session.latest_observation,
-                    thought=decision.thought,
+                    observation_before=observation_before,
+                    decision=decision,
                     action=action,
-                    tool_call=tool_call,
-                    tool_result=tool_result,
                 )
-                session.add_trace_item(trace_item)
+                if report is not None:
+                    return report
 
-                if action.tool_name == "finish_task":
-                    return session.complete(self._build_finish_report(session, tool_result))
-
-            report = FinalReport(
-                session_id=session.session_id,
-                status=RuntimeStatus.STOPPED,
-                summary="The runtime reached the maximum configured step count.",
-                completed=False,
-                actions_taken=self._actions_taken(session),
-                next_steps=["Increase `max_steps` or improve progress detection."],
-                trace_refs=self._trace_refs(session),
-                artifact_refs=self._artifact_refs(session),
-                final_url=self._final_url(session),
-            )
-            return session.complete(report)
+            return session.complete(self._max_steps_report(session))
         finally:
             try:
                 self.browser.stop()
             except Exception:
                 pass
+
+    def _handle_ask_user(
+        self,
+        *,
+        session: RuntimeSession,
+        step_index: int,
+        observation: AgentObservation,
+        thought,
+        decision: PlannerDecision,
+    ) -> FinalReport:
+        question = PendingUserQuestion(question=decision.user_question or "")
+        session.set_pending_user_question(question)
+        progress_outcome = ProgressOutcome(
+            made_progress=False,
+            summary="Runtime paused because the planner needs user input.",
+            signals=["planner requested user input"],
+            no_progress_streak=session.no_progress_streak,
+        )
+        report = FinalReport(
+            session_id=session.session_id,
+            status=RuntimeStatus.WAITING_FOR_USER,
+            summary="The runtime requires more information from the user.",
+            completed=False,
+            actions_taken=self._actions_taken(session),
+            open_questions=[question.question],
+            trace_refs=self._trace_refs(session),
+            artifact_refs=self._artifact_refs(session),
+            final_url=self._final_url(session),
+            step_count=session.step_count + 1,
+            pending_user_question=question,
+        )
+        trace_item = self.trace_recorder.record(
+            step_index=step_index,
+            observation=observation,
+            thought=thought,
+            planner_decision=decision,
+            progress_outcome=progress_outcome,
+            state_transition="running -> waiting_for_user",
+            report=report,
+            notes=["Planner requested additional user information."],
+        )
+        session.add_trace_item(trace_item)
+        report.trace_refs = self._trace_refs(session)
+        report.artifact_refs = self._artifact_refs(session)
+        session.record_history(
+            f"step {step_index}: planner asked the user a blocking question."
+        )
+        session.increment_step()
+        return session.complete(report)
+
+    def _handle_planner_failure(
+        self,
+        *,
+        session: RuntimeSession,
+        step_index: int,
+        observation: AgentObservation,
+        thought,
+        decision: PlannerDecision,
+    ) -> FinalReport:
+        progress_outcome = ProgressOutcome(
+            made_progress=False,
+            summary="Runtime stopped because the planner could not continue safely.",
+            signals=["planner returned fail"],
+            no_progress_streak=session.no_progress_streak + 1,
+        )
+        report = FinalReport(
+            session_id=session.session_id,
+            status=RuntimeStatus.FAILED,
+            summary=decision.failure_reason or "Planner failed to choose a safe next step.",
+            completed=False,
+            actions_taken=self._actions_taken(session),
+            next_steps=["Inspect the planner output and trace artifacts."],
+            trace_refs=self._trace_refs(session),
+            artifact_refs=self._artifact_refs(session),
+            final_url=self._final_url(session),
+            step_count=session.step_count + 1,
+            failure_reason=decision.failure_reason,
+        )
+        trace_item = self.trace_recorder.record(
+            step_index=step_index,
+            observation=observation,
+            thought=thought,
+            planner_decision=decision,
+            progress_outcome=progress_outcome,
+            state_transition="running -> failed",
+            report=report,
+            notes=["Planner returned an explicit failure decision."],
+        )
+        session.add_trace_item(trace_item)
+        report.trace_refs = self._trace_refs(session)
+        report.artifact_refs = self._artifact_refs(session)
+        session.record_history(f"step {step_index}: planner failed to continue safely.")
+        session.register_progress(progress_outcome)
+        session.increment_step()
+        session.failure_reason = decision.failure_reason
+        return session.complete(report)
+
+    def _handle_repeated_action_stop(
+        self,
+        *,
+        session: RuntimeSession,
+        step_index: int,
+        observation: AgentObservation,
+        thought,
+        decision: PlannerDecision,
+        action: AgentAction,
+    ) -> FinalReport:
+        progress_outcome = ProgressOutcome(
+            made_progress=False,
+            summary="Runtime stopped to avoid repeating the same action without progress.",
+            signals=["repeated action without progress"],
+            no_progress_streak=session.no_progress_streak + 1,
+        )
+        report = FinalReport(
+            session_id=session.session_id,
+            status=RuntimeStatus.FAILED,
+            summary=(
+                f"Runtime stopped because `{action.tool_name}` was selected repeatedly "
+                "without observable progress."
+            ),
+            completed=False,
+            actions_taken=self._actions_taken(session),
+            next_steps=["Inspect the planner rationale and progress detection signals."],
+            trace_refs=self._trace_refs(session),
+            artifact_refs=self._artifact_refs(session),
+            final_url=self._final_url(session),
+            step_count=session.step_count + 1,
+            failure_reason="Repeated action without progress.",
+        )
+        trace_item = self.trace_recorder.record(
+            step_index=step_index,
+            observation=observation,
+            thought=thought,
+            planner_decision=decision,
+            action=action,
+            progress_outcome=progress_outcome,
+            state_transition="running -> failed",
+            report=report,
+            notes=["Loop protection stopped a repeated no-progress action."],
+        )
+        session.add_trace_item(trace_item)
+        report.trace_refs = self._trace_refs(session)
+        report.artifact_refs = self._artifact_refs(session)
+        session.record_history(
+            f"step {step_index}: repeated `{action.tool_name}` without progress."
+        )
+        session.register_progress(progress_outcome)
+        session.increment_step()
+        session.failure_reason = report.failure_reason
+        return session.complete(report)
+
+    def _pause_for_confirmation(
+        self,
+        *,
+        session: RuntimeSession,
+        step_index: int,
+        observation: AgentObservation,
+        thought,
+        decision: PlannerDecision,
+        action: AgentAction,
+        reason: str,
+        consequences: list[str],
+    ) -> FinalReport:
+        session.add_action(action)
+        tool_call = ToolCall(
+            action_id=action.action_id,
+            skill_name=action.tool_name,
+            arguments=action.parameters,
+        )
+        session.add_tool_call(tool_call)
+        request = self.confirmation_manager.build_request(
+            action,
+            reason=reason or decision.rationale,
+            consequences=consequences,
+        )
+        session.set_pending_confirmation(request, action=action)
+        tool_result = ToolResult(
+            call_id=tool_call.call_id,
+            skill_name=tool_call.skill_name,
+            status=ToolExecutionStatus.WAITING_FOR_CONFIRMATION,
+            message=reason or "Action requires explicit confirmation.",
+            data={"confirmation_request": request.model_dump(mode="json")},
+            duration_ms=0,
+        )
+        session.add_tool_result(tool_result)
+        progress_outcome = ProgressOutcome(
+            made_progress=False,
+            summary="Execution paused pending user confirmation.",
+            signals=["confirmation required"],
+            no_progress_streak=session.no_progress_streak,
+        )
+        report = FinalReport(
+            session_id=session.session_id,
+            status=RuntimeStatus.WAITING_FOR_CONFIRMATION,
+            summary=f"Waiting for confirmation before `{action.tool_name}` can run.",
+            completed=False,
+            actions_taken=self._actions_taken(session),
+            open_questions=[request.prompt],
+            next_steps=["Approve or reject the pending confirmation request."],
+            trace_refs=self._trace_refs(session),
+            artifact_refs=self._artifact_refs(session),
+            final_url=self._final_url(session),
+            step_count=session.step_count + 1,
+            pending_confirmation=request,
+        )
+        trace_item = self.trace_recorder.record(
+            step_index=step_index,
+            observation=observation,
+            thought=thought,
+            planner_decision=decision,
+            action=action,
+            tool_call=tool_call,
+            tool_result=tool_result,
+            progress_outcome=progress_outcome,
+            state_transition="running -> waiting_for_confirmation",
+            report=report,
+            notes=consequences or ["Safety guardrails required confirmation."],
+        )
+        session.add_trace_item(trace_item)
+        report.trace_refs = self._trace_refs(session)
+        report.artifact_refs = self._artifact_refs(session)
+        session.record_history(
+            f"step {step_index}: paused for confirmation before `{action.tool_name}`."
+        )
+        session.increment_step()
+        return session.complete(report)
+
+    def _execute_action_step(
+        self,
+        *,
+        session: RuntimeSession,
+        step_index: int,
+        observation_before: AgentObservation,
+        decision: PlannerDecision,
+        action: AgentAction,
+        record_action: bool = True,
+        notes: list[str] | None = None,
+    ) -> FinalReport | None:
+        thought = session.latest_thought or decision.to_agent_thought()
+        if record_action:
+            session.add_action(action)
+        tool_call = ToolCall(
+            action_id=action.action_id,
+            skill_name=action.tool_name,
+            arguments=action.parameters,
+        )
+        session.add_tool_call(tool_call)
+
+        tool_result = self._execute_skill(action, tool_call, session)
+        session.add_tool_result(tool_result)
+
+        observation_after = self._extract_observation(tool_result)
+        if observation_after is not None:
+            session.add_observation(observation_after)
+        elif tool_result.status == ToolExecutionStatus.SUCCESS and action.tool_name != "finish_task":
+            observation_after = self._observe_current_page(session)
+
+        if action.tool_name == "finish_task" and tool_result.status == ToolExecutionStatus.SUCCESS:
+            progress_outcome = ProgressOutcome(
+                made_progress=True,
+                summary="Task finished through an explicit planner finish decision.",
+                signals=["finish decision executed"],
+                no_progress_streak=0,
+            )
+        else:
+            progress_outcome = self.progress_detector.evaluate(
+                previous_observation=observation_before,
+                current_observation=observation_after or observation_before,
+                tool_result=tool_result,
+                planner_decision=decision,
+                previous_no_progress_streak=session.no_progress_streak,
+            )
+        session.register_progress(progress_outcome)
+
+        report: FinalReport | None = None
+        state_transition: str | None = None
+        trace_notes = list(notes or [])
+
+        if tool_result.status == ToolExecutionStatus.ERROR:
+            report = FinalReport(
+                session_id=session.session_id,
+                status=RuntimeStatus.FAILED,
+                summary=f"Runtime failed while executing `{action.tool_name}`.",
+                completed=False,
+                actions_taken=self._actions_taken(session),
+                next_steps=["Inspect the structured tool result and trace artifacts."],
+                trace_refs=self._trace_refs(session),
+                artifact_refs=self._artifact_refs(session),
+                final_url=self._final_url(session),
+                step_count=session.step_count + 1,
+                failure_reason=tool_result.error_message or tool_result.message,
+            )
+            state_transition = "running -> failed"
+            trace_notes.append("Execution stopped because the skill returned an error.")
+            session.failure_reason = report.failure_reason
+        elif action.tool_name == "finish_task":
+            report = self._build_finish_report(session, tool_result, step_count=session.step_count + 1)
+            state_transition = f"running -> {report.status.value}"
+            session.completion_reason = report.completion_reason
+        elif progress_outcome.no_progress_streak >= session.settings.max_no_progress_steps:
+            report = FinalReport(
+                session_id=session.session_id,
+                status=RuntimeStatus.FAILED,
+                summary=(
+                    "Runtime stopped after multiple steps without observable progress."
+                ),
+                completed=False,
+                actions_taken=self._actions_taken(session),
+                next_steps=[
+                    "Inspect the latest page state and planner rationale.",
+                    "Provide a clarifying instruction or extend the skill set.",
+                ],
+                trace_refs=self._trace_refs(session),
+                artifact_refs=self._artifact_refs(session),
+                final_url=self._final_url(session),
+                step_count=session.step_count + 1,
+                failure_reason=progress_outcome.summary,
+            )
+            state_transition = "running -> failed"
+            trace_notes.append("Loop protection stopped the session after stagnation.")
+            session.failure_reason = report.failure_reason
+
+        trace_item = self.trace_recorder.record(
+            step_index=step_index,
+            observation=observation_after or observation_before,
+            thought=thought,
+            planner_decision=decision,
+            action=action,
+            tool_call=tool_call,
+            tool_result=tool_result,
+            progress_outcome=progress_outcome,
+            state_transition=state_transition,
+            report=report,
+            notes=trace_notes,
+        )
+        session.add_trace_item(trace_item)
+        if report is not None:
+            report.trace_refs = self._trace_refs(session)
+            report.artifact_refs = self._artifact_refs(session)
+        session.record_history(
+            self._history_line(
+                step_index=step_index,
+                action=action,
+                tool_result=tool_result,
+                progress_outcome=progress_outcome,
+                report=report,
+            )
+        )
+        session.increment_step()
+
+        if report is not None:
+            return session.complete(report)
+        return None
+
+    def _observe_current_page(self, session: RuntimeSession) -> AgentObservation:
+        skill = self.skill_registry.get("observe_page")
+        payload = skill.validate_input({})
+        try:
+            output_payload = skill.execute(self._context(session), payload)
+        except SkillExecutionError as exc:
+            raise RuntimeError(exc.message) from exc
+        except Exception as exc:
+            raise RuntimeError("Failed to observe the current page.") from exc
+
+        output_data = output_payload.model_dump(mode="json")
+        observation_payload = output_data.get("observation")
+        if not isinstance(observation_payload, dict):
+            raise RuntimeError("observe_page did not return an observation payload.")
+        observation = AgentObservation.model_validate(observation_payload)
+        session.add_observation(observation)
+        return observation
+
+    def _execute_skill(
+        self,
+        action: AgentAction,
+        tool_call: ToolCall,
+        session: RuntimeSession,
+    ) -> ToolResult:
+        step_started = perf_counter()
+        try:
+            skill = self.skill_registry.get(action.tool_name)
+            payload = skill.validate_input(action.parameters)
+            output_payload = skill.execute(self._context(session), payload)
+            output_data = output_payload.model_dump(mode="json")
+            return ToolResult(
+                call_id=tool_call.call_id,
+                skill_name=tool_call.skill_name,
+                status=ToolExecutionStatus.SUCCESS,
+                message=self._tool_result_message(action.tool_name, output_data),
+                data=output_data,
+                artifacts=self._extract_artifacts(output_data),
+                duration_ms=self._elapsed_ms(step_started),
+            )
+        except SkillExecutionError as exc:
+            return ToolResult(
+                call_id=tool_call.call_id,
+                skill_name=tool_call.skill_name,
+                status=ToolExecutionStatus.ERROR,
+                message=exc.message,
+                data=exc.data,
+                artifacts=exc.artifacts,
+                error_code=exc.error_code,
+                error_message=exc.message,
+                duration_ms=self._elapsed_ms(step_started),
+            )
+        except Exception as exc:
+            return ToolResult(
+                call_id=tool_call.call_id,
+                skill_name=tool_call.skill_name,
+                status=ToolExecutionStatus.ERROR,
+                message=f"Skill `{action.tool_name}` failed.",
+                error_code="skill_execution_error",
+                error_message=str(exc),
+                duration_ms=self._elapsed_ms(step_started),
+            )
 
     def _context(self, session: RuntimeSession) -> SkillContext:
         return SkillContext(
@@ -304,7 +680,7 @@ class RuntimeLoop:
 
     def _extract_observation(self, tool_result: ToolResult) -> AgentObservation | None:
         observation_payload = tool_result.data.get("observation")
-        if not observation_payload:
+        if not isinstance(observation_payload, dict):
             return None
         return AgentObservation.model_validate(observation_payload)
 
@@ -312,12 +688,15 @@ class RuntimeLoop:
         self,
         session: RuntimeSession,
         tool_result: ToolResult,
+        *,
+        step_count: int,
     ) -> FinalReport:
         status = RuntimeStatus(tool_result.data["status"])
+        summary = tool_result.data["summary"]
         return FinalReport(
             session_id=session.session_id,
             status=status,
-            summary=tool_result.data["summary"],
+            summary=summary,
             completed=status == RuntimeStatus.COMPLETED,
             actions_taken=self._actions_taken(session),
             open_questions=tool_result.data.get("open_questions", []),
@@ -325,6 +704,60 @@ class RuntimeLoop:
             trace_refs=self._trace_refs(session),
             artifact_refs=self._artifact_refs(session),
             final_url=tool_result.data.get("final_url") or self._final_url(session),
+            step_count=step_count,
+            completion_reason=summary if status == RuntimeStatus.COMPLETED else None,
+            failure_reason=summary if status == RuntimeStatus.FAILED else None,
+        )
+
+    def _startup_failure_report(
+        self,
+        session: RuntimeSession,
+        exc: Exception,
+    ) -> FinalReport:
+        return FinalReport(
+            session_id=session.session_id,
+            status=RuntimeStatus.FAILED,
+            summary="Runtime failed before the browser session became available.",
+            completed=False,
+            actions_taken=self._actions_taken(session),
+            next_steps=self._startup_next_steps(exc),
+            trace_refs=self._trace_refs(session),
+            artifact_refs=self._artifact_refs(session),
+            final_url=self._final_url(session),
+            step_count=session.step_count,
+            failure_reason=str(exc),
+        )
+
+    def _max_steps_report(self, session: RuntimeSession) -> FinalReport:
+        return FinalReport(
+            session_id=session.session_id,
+            status=RuntimeStatus.STOPPED,
+            summary="The runtime reached the maximum configured step count.",
+            completed=False,
+            actions_taken=self._actions_taken(session),
+            next_steps=["Increase `max_steps` or improve progress detection."],
+            trace_refs=self._trace_refs(session),
+            artifact_refs=self._artifact_refs(session),
+            final_url=self._final_url(session),
+            step_count=session.step_count,
+            failure_reason="Maximum step count reached.",
+        )
+
+    def _build_stopped_report(
+        self,
+        session: RuntimeSession,
+        summary: str,
+    ) -> FinalReport:
+        return FinalReport(
+            session_id=session.session_id,
+            status=RuntimeStatus.STOPPED,
+            summary=summary,
+            completed=False,
+            actions_taken=self._actions_taken(session),
+            trace_refs=self._trace_refs(session),
+            artifact_refs=self._artifact_refs(session),
+            final_url=self._final_url(session),
+            step_count=session.step_count,
         )
 
     def _tool_result_message(
@@ -387,12 +820,12 @@ class RuntimeLoop:
     def _elapsed_ms(self, started_at: float) -> int:
         return int((perf_counter() - started_at) * 1000)
 
-    def _is_repeated_action(
+    def _is_repeated_action_without_progress(
         self,
         action: AgentAction,
         session: RuntimeSession,
     ) -> bool:
-        if len(session.actions) < 2:
+        if session.no_progress_streak == 0 or len(session.actions) < 2:
             return False
         recent = session.actions[-2:]
         return all(
@@ -400,3 +833,23 @@ class RuntimeLoop:
             and previous.parameters == action.parameters
             for previous in recent
         )
+
+    def _history_line(
+        self,
+        *,
+        step_index: int,
+        action: AgentAction,
+        tool_result: ToolResult,
+        progress_outcome: ProgressOutcome,
+        report: FinalReport | None,
+    ) -> str:
+        status = tool_result.status.value
+        parts = [
+            f"step {step_index}",
+            f"action={action.tool_name}",
+            f"status={status}",
+            f"progress={'yes' if progress_outcome.made_progress else 'no'}",
+        ]
+        if report is not None:
+            parts.append(f"session={report.status.value}")
+        return " | ".join(parts)

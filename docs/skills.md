@@ -8,6 +8,8 @@ They are not scenario scripts.
 
 The agent must solve tasks by choosing from these skills based on the current observation, not by jumping into a hidden task-specific pipeline.
 
+The planner is only allowed to choose skills that exist in the registry. Unknown tools, ad hoc browser commands, and generated code are outside the allowed action space.
+
 ## Skill Groups
 
 - observation skills
@@ -28,6 +30,8 @@ Every skill must define:
 - `execute(...)`
 
 Every skill execution must return structured data through a `ToolResult`.
+
+The runtime also uses `observe_page` as an internal observation step before planning and after actions that do not naturally return a fresh observation.
 
 ## MVP Skill Set
 
@@ -126,6 +130,9 @@ Constraints:
 - must never bypass safety checks for destructive clicks;
 - should only target one resolved element.
 
+Notes:
+- the planner may propose a click, but the safety layer still decides whether confirmation is required before execution.
+
 Common errors:
 - selector not found;
 - element not visible;
@@ -189,6 +196,10 @@ Common errors:
 Purpose:
 - produce a formal user confirmation request for a risky planned action.
 
+Current runtime note:
+- the main loop can now create confirmation requests directly from planner decisions or safety guardrails;
+- this helper skill remains available as a typed contract, but the planner should not select it as a substitute for the risky target action itself.
+
 Input contract:
 - `action_name: str`
 - `rationale: str`
@@ -214,6 +225,10 @@ Common errors:
 
 Purpose:
 - signal task completion or controlled termination with a user-facing summary.
+
+Current runtime note:
+- the planner emits `decision_type=finish`;
+- the runtime then routes that decision through the typed `finish_task` skill instead of allowing the planner to finalize the session with free-form text.
 
 Input contract:
 - `status: str`
@@ -260,4 +275,6 @@ These are explicitly not allowed:
 - a skill named after a business scenario such as `delete_spam_emails`;
 - a skill that hides multiple unrelated browser steps;
 - an output contract that is free-form text only;
-- direct planner bypass through ad hoc calls to the browser layer.
+- direct planner bypass through ad hoc calls to the browser layer;
+- planner output that references a skill that is not registered;
+- site-specific `if/else` logic embedded inside a generic skill.

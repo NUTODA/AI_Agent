@@ -4,7 +4,8 @@
 
 - Stage 1 foundation work is complete.
 - Stage 2 browser layer now has a real Playwright-backed implementation.
-- The next major gap is Stage 4 quality: replacing the bootstrap planner with a real multi-step planner while preserving the same boundaries.
+- Stage 4 agent loop now has a real typed multi-step planner/runtime implementation.
+- The next major gaps are better pause/resume UX, broader reusable skills, and more runtime hardening on dynamic pages.
 
 ## Stage 1: Foundation Skeleton
 
@@ -95,6 +96,10 @@ Readiness criteria:
 - planner output is parsed and validated;
 - the runtime can explain why it chose each action.
 
+Status:
+
+- delivered in the current repository state.
+
 ## Stage 5: Security Layer
 
 Deliverables:
@@ -115,6 +120,10 @@ Readiness criteria:
 - confirmation requests are human-readable and typed;
 - the runtime reports blocked or deferred actions clearly.
 
+Status:
+
+- core flow delivered in the current repository state; resume UX is still partial.
+
 ## Stage 6: Demo Scenarios
 
 Deliverables:
@@ -134,6 +143,10 @@ Readiness criteria:
 - demos prove the general architecture rather than a hidden scripted flow;
 - the agent can pause for confirmation or clarification naturally;
 - scenario notes document assumptions and limits.
+
+Current note:
+
+- the core runtime now supports multi-step planning and pause states without task-specific code, but scenario depth still depends on the current generic skill set.
 
 ## Stage 7: Polishing
 
