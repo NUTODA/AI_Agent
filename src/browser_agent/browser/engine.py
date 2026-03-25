@@ -392,6 +392,50 @@ class BrowserEngine(Protocol):
     def extract_page_text(self, max_chars: int = 4000) -> str:
         """Backward-compatible alias for page text extraction."""
 
+    def select_option(
+        self,
+        target: str,
+        value: str | None = None,
+        label: str | None = None,
+    ) -> BrowserOperationResult:
+        """Select an option from a dropdown by value or label."""
+
+    def scroll_viewport(
+        self,
+        direction: str,
+        amount: int,
+        target: str | None = None,
+    ) -> BrowserOperationResult:
+        """Scroll the page or an element."""
+
+    def press_key(
+        self,
+        key: str,
+        target: str | None = None,
+    ) -> BrowserOperationResult:
+        """Press a keyboard key, optionally targeting an element."""
+
+    def wait_for_element(
+        self,
+        selector: str,
+        timeout_ms: int,
+        state: str,
+    ) -> BrowserOperationResult:
+        """Wait for an element to reach a specific state."""
+
+    def upload_file(
+        self,
+        target: str,
+        file_path: str,
+    ) -> BrowserOperationResult:
+        """Upload a file to a file input element."""
+
+    def inspect_dialog(
+        self,
+        timeout_ms: int = 100,
+    ) -> BrowserOperationResult:
+        """Check for and read any active dialog."""
+
 
 class StubBrowserEngine:
     """In-memory browser stub kept for smoke tests and isolated unit tests."""
@@ -498,6 +542,139 @@ class StubBrowserEngine:
 
     def extract_page_text(self, max_chars: int = 4000) -> str:
         return self.get_page_text(max_chars=max_chars)
+
+    def select_option(
+        self,
+        target: str,
+        value: str | None = None,
+        label: str | None = None,
+    ) -> BrowserOperationResult:
+        self._state = self._state.model_copy(
+            update={
+                "summary": f"Stub browser selected option from {target}.",
+                "metadata": {
+                    "target": target,
+                    "selected_value": value,
+                    "selected_text": label,
+                },
+            },
+        )
+        return BrowserOperationResult(
+            message=f"Selected option from {target}.",
+            page_state=self._state,
+            metadata={
+                "target": target,
+                "selected_value": value,
+                "selected_text": label,
+            },
+        )
+
+    def scroll_viewport(
+        self,
+        direction: str,
+        amount: int,
+        target: str | None = None,
+    ) -> BrowserOperationResult:
+        self._state = self._state.model_copy(
+            update={
+                "summary": f"Stub browser scrolled {direction} by {amount}px.",
+                "metadata": {
+                    "direction": direction,
+                    "amount": amount,
+                    "target": target,
+                    "scroll_x": 0,
+                    "scroll_y": amount if direction == "down" else -amount if direction == "up" else 0,
+                },
+            },
+        )
+        return BrowserOperationResult(
+            message=f"Scrolled {direction} by {amount}px.",
+            page_state=self._state,
+            metadata={
+                "direction": direction,
+                "amount": amount,
+                "target": target,
+                "scroll_x": 0,
+                "scroll_y": amount if direction == "down" else -amount if direction == "up" else 0,
+            },
+        )
+
+    def press_key(
+        self,
+        key: str,
+        target: str | None = None,
+    ) -> BrowserOperationResult:
+        self._state = self._state.model_copy(
+            update={
+                "summary": f"Stub browser pressed key '{key}' on {target or 'page'}.",
+                "metadata": {
+                    "key": key,
+                    "target": target,
+                },
+            },
+        )
+        return BrowserOperationResult(
+            message=f"Pressed key '{key}'.",
+            page_state=self._state,
+            metadata={
+                "key": key,
+                "target": target,
+            },
+        )
+
+    def wait_for_element(
+        self,
+        selector: str,
+        timeout_ms: int,
+        state: str,
+    ) -> BrowserOperationResult:
+        return BrowserOperationResult(
+            message=f"Stub browser waited for {selector} to be {state}.",
+            page_state=self._state,
+            metadata={
+                "selector": selector,
+                "waited_ms": 0,
+                "found": True,
+                "state": state,
+            },
+        )
+
+    def upload_file(
+        self,
+        target: str,
+        file_path: str,
+    ) -> BrowserOperationResult:
+        self._state = self._state.model_copy(
+            update={
+                "summary": f"Stub browser uploaded file to {target}.",
+                "metadata": {
+                    "target": target,
+                    "file_path": file_path,
+                },
+            },
+        )
+        return BrowserOperationResult(
+            message=f"Uploaded file to {target}.",
+            page_state=self._state,
+            metadata={
+                "target": target,
+                "file_path": file_path,
+            },
+        )
+
+    def inspect_dialog(
+        self,
+        timeout_ms: int = 100,
+    ) -> BrowserOperationResult:
+        return BrowserOperationResult(
+            message="No dialog visible on stub page.",
+            page_state=self._state,
+            metadata={
+                "dialog_visible": False,
+                "dialog_type": None,
+                "dialog_message": None,
+            },
+        )
 
 
 class PlaywrightBrowserEngine:
@@ -824,6 +1001,423 @@ class PlaywrightBrowserEngine:
         """Backward-compatible alias for page text extraction."""
 
         return self.get_page_text(max_chars=max_chars)
+
+    def select_option(
+        self,
+        target: str,
+        value: str | None = None,
+        label: str | None = None,
+    ) -> BrowserOperationResult:
+        """Select an option from a dropdown by value or label."""
+
+        start = perf_counter()
+        page = self.get_page()
+        resolution = resolve_target_candidates(target, self._element_cache)
+
+        if resolution.used_element_reference and not resolution.candidates:
+            return self._result_error(
+                action="select_option",
+                message=f"Element reference `{target}` is no longer available.",
+                error_code="element_reference_not_found",
+                duration_ms=self._elapsed_ms(start),
+                metadata={"target": target},
+            )
+
+        errors: list[str] = []
+        for candidate in resolution.candidates:
+            try:
+                locator = page.locator(candidate.value).first
+                select_params: dict[str, str | None] = {}
+                if value is not None:
+                    select_params["value"] = value
+                if label is not None:
+                    select_params["label"] = label
+
+                locator.select_option(**select_params, timeout=self.default_timeout_ms)
+                page_state = self._observe_page(reason="select_option")
+
+                metadata: dict[str, object] = {
+                    "target": target,
+                    "resolved_selector": candidate.value,
+                    "selector_strategy": candidate.strategy.value,
+                    "used_element_reference": resolution.used_element_reference,
+                }
+                if value:
+                    metadata["selected_value"] = value
+                if label:
+                    metadata["selected_text"] = label
+
+                return BrowserOperationResult(
+                    message=f"Selected option from target `{target}`.",
+                    page_state=page_state,
+                    metadata=metadata,
+                    duration_ms=self._elapsed_ms(start),
+                    artifacts=page_state.artifact_refs,
+                )
+            except Exception as exc:
+                errors.append(f"{candidate.value}: {exc}")
+
+        return self._result_error(
+            action="select_option",
+            message=f"Failed to select option from target `{target}`.",
+            error_code="select_option_failed",
+            error_message=" | ".join(errors),
+            duration_ms=self._elapsed_ms(start),
+            metadata={
+                "target": target,
+                "attempted_selectors": [c.value for c in resolution.candidates],
+                "used_element_reference": resolution.used_element_reference,
+            },
+        )
+
+    def scroll_viewport(
+        self,
+        direction: str,
+        amount: int,
+        target: str | None = None,
+    ) -> BrowserOperationResult:
+        """Scroll the page or an element."""
+
+        start = perf_counter()
+        page = self.get_page()
+
+        direction_map = {
+            "up": (0, -amount),
+            "down": (0, amount),
+            "left": (-amount, 0),
+            "right": (amount, 0),
+        }
+
+        if direction not in direction_map:
+            return self._result_error(
+                action="scroll_viewport",
+                message=f"Invalid scroll direction: {direction}",
+                error_code="invalid_scroll_direction",
+                duration_ms=self._elapsed_ms(start),
+                metadata={"direction": direction, "amount": amount},
+            )
+
+        dx, dy = direction_map[direction]
+
+        try:
+            if target:
+                # Scroll a specific element
+                resolution = resolve_target_candidates(target, self._element_cache)
+                if resolution.used_element_reference and not resolution.candidates:
+                    return self._result_error(
+                        action="scroll_viewport",
+                        message=f"Element reference `{target}` is no longer available.",
+                        error_code="element_reference_not_found",
+                        duration_ms=self._elapsed_ms(start),
+                        metadata={"target": target},
+                    )
+
+                for candidate in resolution.candidates:
+                    try:
+                        locator = page.locator(candidate.value).first
+                        locator.evaluate(f"el => el.scrollBy({dx}, {dy})")
+                        break
+                    except Exception as exc:
+                        continue
+            else:
+                # Scroll the main viewport
+                page.evaluate(f"() => window.scrollBy({dx}, {dy})")
+
+            page_state = self._observe_page(reason="scroll_viewport")
+            scroll_x = page.evaluate("() => window.scrollX")
+            scroll_y = page.evaluate("() => window.scrollY")
+
+            return BrowserOperationResult(
+                message=f"Scrolled {direction} by {amount}px.",
+                page_state=page_state,
+                metadata={
+                    "direction": direction,
+                    "amount": amount,
+                    "target": target,
+                    "scroll_x": scroll_x,
+                    "scroll_y": scroll_y,
+                },
+                duration_ms=self._elapsed_ms(start),
+                artifacts=page_state.artifact_refs,
+            )
+        except Exception as exc:
+            return self._result_from_exception(
+                action="scroll_viewport",
+                exc=exc,
+                start=start,
+                metadata={"direction": direction, "amount": amount, "target": target},
+            )
+
+    def press_key(
+        self,
+        key: str,
+        target: str | None = None,
+    ) -> BrowserOperationResult:
+        """Press a keyboard key, optionally targeting an element."""
+
+        start = perf_counter()
+        page = self.get_page()
+
+        try:
+            if target:
+                resolution = resolve_target_candidates(target, self._element_cache)
+                if resolution.used_element_reference and not resolution.candidates:
+                    return self._result_error(
+                        action="press_key",
+                        message=f"Element reference `{target}` is no longer available.",
+                        error_code="element_reference_not_found",
+                        duration_ms=self._elapsed_ms(start),
+                        metadata={"key": key, "target": target},
+                    )
+
+                errors: list[str] = []
+                for candidate in resolution.candidates:
+                    try:
+                        locator = page.locator(candidate.value).first
+                        locator.press(key, timeout=self.default_timeout_ms)
+                        page_state = self._observe_page(reason="press_key")
+
+                        return BrowserOperationResult(
+                            message=f"Pressed key `{key}` on target `{target}`.",
+                            page_state=page_state,
+                            metadata={
+                                "key": key,
+                                "target": target,
+                                "resolved_selector": candidate.value,
+                                "selector_strategy": candidate.strategy.value,
+                                "used_element_reference": resolution.used_element_reference,
+                            },
+                            duration_ms=self._elapsed_ms(start),
+                            artifacts=page_state.artifact_refs,
+                        )
+                    except Exception as exc:
+                        errors.append(f"{candidate.value}: {exc}")
+
+                return self._result_error(
+                    action="press_key",
+                    message=f"Failed to press key `{key}` on target `{target}`.",
+                    error_code="press_key_failed",
+                    error_message=" | ".join(errors),
+                    duration_ms=self._elapsed_ms(start),
+                    metadata={
+                        "key": key,
+                        "target": target,
+                        "attempted_selectors": [c.value for c in resolution.candidates],
+                        "used_element_reference": resolution.used_element_reference,
+                    },
+                )
+            else:
+                # Global key press
+                page.keyboard.press(key)
+                page_state = self._observe_page(reason="press_key")
+
+                return BrowserOperationResult(
+                    message=f"Pressed key `{key}`.",
+                    page_state=page_state,
+                    metadata={"key": key},
+                    duration_ms=self._elapsed_ms(start),
+                    artifacts=page_state.artifact_refs,
+                )
+        except Exception as exc:
+            return self._result_from_exception(
+                action="press_key",
+                exc=exc,
+                start=start,
+                metadata={"key": key, "target": target},
+            )
+
+    def wait_for_element(
+        self,
+        selector: str,
+        timeout_ms: int,
+        state: str,
+    ) -> BrowserOperationResult:
+        """Wait for an element to reach a specific state."""
+
+        start = perf_counter()
+        page = self.get_page()
+
+        state_map = {
+            "visible": "visible",
+            "hidden": "hidden",
+            "attached": "attached",
+            "detached": "detached",
+        }
+
+        if state not in state_map:
+            return self._result_error(
+                action="wait_for_element",
+                message=f"Invalid wait state: {state}",
+                error_code="invalid_wait_state",
+                duration_ms=self._elapsed_ms(start),
+                metadata={"selector": selector, "state": state},
+            )
+
+        try:
+            locator = page.locator(selector).first
+            locator.wait_for(
+                state=state_map[state],
+                timeout=timeout_ms,
+            )
+            page_state = self._observe_page(reason="wait_for_element")
+
+            return BrowserOperationResult(
+                message=f"Element `{selector}` is now {state}.",
+                page_state=page_state,
+                metadata={
+                    "selector": selector,
+                    "state": state,
+                    "found": True,
+                    "waited_ms": self._elapsed_ms(start),
+                },
+                duration_ms=self._elapsed_ms(start),
+                artifacts=page_state.artifact_refs,
+            )
+        except Exception as exc:
+            # Element not found within timeout - this is expected behavior
+            page_state = self._observe_page(reason="wait_for_element")
+
+            return BrowserOperationResult(
+                ok=False,
+                message=f"Element `{selector}` did not become {state} within {timeout_ms}ms.",
+                page_state=page_state,
+                metadata={
+                    "selector": selector,
+                    "state": state,
+                    "found": False,
+                    "waited_ms": timeout_ms,
+                },
+                duration_ms=self._elapsed_ms(start),
+                artifacts=page_state.artifact_refs,
+            )
+
+    def upload_file(
+        self,
+        target: str,
+        file_path: str,
+    ) -> BrowserOperationResult:
+        """Upload a file to a file input element."""
+
+        start = perf_counter()
+        page = self.get_page()
+        resolution = resolve_target_candidates(target, self._element_cache)
+
+        if resolution.used_element_reference and not resolution.candidates:
+            return self._result_error(
+                action="upload_file",
+                message=f"Element reference `{target}` is no longer available.",
+                error_code="element_reference_not_found",
+                duration_ms=self._elapsed_ms(start),
+                metadata={"target": target, "file_path": file_path},
+            )
+
+        errors: list[str] = []
+        for candidate in resolution.candidates:
+            try:
+                locator = page.locator(candidate.value).first
+                locator.set_input_files(file_path, timeout=self.default_timeout_ms)
+                page_state = self._observe_page(reason="upload_file")
+
+                return BrowserOperationResult(
+                    message=f"Uploaded file to target `{target}`.",
+                    page_state=page_state,
+                    metadata={
+                        "target": target,
+                        "file_path": file_path,
+                        "resolved_selector": candidate.value,
+                        "selector_strategy": candidate.strategy.value,
+                        "used_element_reference": resolution.used_element_reference,
+                    },
+                    duration_ms=self._elapsed_ms(start),
+                    artifacts=page_state.artifact_refs,
+                )
+            except Exception as exc:
+                errors.append(f"{candidate.value}: {exc}")
+
+        return self._result_error(
+            action="upload_file",
+            message=f"Failed to upload file to target `{target}`.",
+            error_code="upload_file_failed",
+            error_message=" | ".join(errors),
+            duration_ms=self._elapsed_ms(start),
+            metadata={
+                "target": target,
+                "file_path": file_path,
+                "attempted_selectors": [c.value for c in resolution.candidates],
+                "used_element_reference": resolution.used_element_reference,
+            },
+        )
+
+    def inspect_dialog(
+        self,
+        timeout_ms: int = 100,
+    ) -> BrowserOperationResult:
+        """Check for and read any active dialog."""
+
+        start = perf_counter()
+        page = self.get_page()
+
+        # Check if there's a visible dialog using JavaScript
+        try:
+            dialog_info = page.evaluate("""
+                () => {
+                    const dialog = document.querySelector('dialog[open], [role="dialog"], [role="alertdialog"]');
+                    if (dialog) {
+                        return {
+                            visible: true,
+                            type: dialog.tagName.toLowerCase() === 'dialog' ? 'dialog' : 'alert',
+                            message: dialog.textContent?.slice(0, 200) || null,
+                        };
+                    }
+                    // Check for native alert/confirm/prompt (they block, so we can't detect them directly)
+                    // But we can check if there's a modal overlay
+                    const modal = document.querySelector('.modal, .overlay, [class*="modal"], [class*="dialog"]');
+                    if (modal) {
+                        return {
+                            visible: true,
+                            type: 'modal',
+                            message: modal.textContent?.slice(0, 200) || null,
+                        };
+                    }
+                    return { visible: false };
+                }
+            """)
+
+            page_state = self._observe_page(reason="inspect_dialog")
+
+            if dialog_info and dialog_info.get("visible"):
+                return BrowserOperationResult(
+                    message=f"Found {dialog_info.get('type')} dialog.",
+                    page_state=page_state,
+                    metadata={
+                        "dialog_visible": True,
+                        "dialog_type": dialog_info.get("type"),
+                        "dialog_message": dialog_info.get("message"),
+                        "dialog_default_value": None,
+                    },
+                    duration_ms=self._elapsed_ms(start),
+                    artifacts=page_state.artifact_refs,
+                )
+            else:
+                return BrowserOperationResult(
+                    message="No dialog visible on the page.",
+                    page_state=page_state,
+                    metadata={
+                        "dialog_visible": False,
+                        "dialog_type": None,
+                        "dialog_message": None,
+                        "dialog_default_value": None,
+                    },
+                    duration_ms=self._elapsed_ms(start),
+                    artifacts=page_state.artifact_refs,
+                )
+        except Exception as exc:
+            return self._result_from_exception(
+                action="inspect_dialog",
+                exc=exc,
+                start=start,
+                metadata={"timeout_ms": timeout_ms},
+            )
 
     def _observe_page(
         self,

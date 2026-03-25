@@ -189,6 +189,164 @@ Common errors:
 - extraction failed;
 - content too large without truncation policy.
 
+### Advanced Observation Skills
+
+#### `wait_for_element`
+
+Purpose:
+- pause execution until an element reaches a specific state (visible, hidden, attached, detached).
+
+Input contract:
+- `selector: str`
+- optional `timeout_ms: int` (default 5000)
+- optional `state: str` ("visible" | "hidden" | "attached" | "detached", default "visible")
+
+Output contract:
+- `found: bool`
+- `selector: str`
+- `waited_ms: int`
+- `state: str`
+- status message
+
+Constraints:
+- should respect timeout limits;
+- not a permanent wait - should fail gracefully after timeout.
+
+Common errors:
+- element never reached desired state;
+- invalid state parameter;
+- selector not found.
+
+### Navigation Extension Skills
+
+#### `scroll_viewport`
+
+Purpose:
+- scroll the page viewport or a specific element in any direction.
+
+Input contract:
+- `direction: str` ("up" | "down" | "left" | "right", default "down")
+- optional `amount: int` (pixels, default 500)
+- optional `selector: str` (if omitted, scrolls main viewport)
+
+Output contract:
+- `direction: str`
+- `amount: int`
+- `target: str | None`
+- `scroll_x: int`
+- `scroll_y: int`
+- status message
+
+Constraints:
+- scroll amount should be reasonable for typical pages;
+- should report final scroll position.
+
+Common errors:
+- invalid direction;
+- element not scrollable;
+- scroll execution failed.
+
+### Interaction Extension Skills
+
+#### `select_option`
+
+Purpose:
+- select an option from a dropdown/select element by value or visible text.
+
+Input contract:
+- `selector: str` or `element_id: str`
+- optional `option_value: str` (the value attribute)
+- optional `option_text: str` (the visible text)
+
+Output contract:
+- `target: str`
+- `selected_value: str | None`
+- `selected_text: str | None`
+- status message
+
+Constraints:
+- one of `option_value` or `option_text` must be provided;
+- should verify the selection was successful.
+
+Common errors:
+- selector not found;
+- option not found in dropdown;
+- element is not a select input.
+
+#### `press_key`
+
+Purpose:
+- press a keyboard key like Enter, Escape, Tab, etc.
+
+Input contract:
+- `key: str` (e.g., "Enter", "Escape", "Tab", "ArrowDown")
+- optional `selector: str` or `element_id: str` (if targeting a specific element)
+
+Output contract:
+- `key: str`
+- `target: str | None`
+- status message
+
+Constraints:
+- should support common navigation and form keys;
+- if no target, sends to active element or page.
+
+Common errors:
+- invalid key name;
+- target element not focusable;
+- key press failed.
+
+### File Handling Skills
+
+#### `upload_file`
+
+Purpose:
+- upload a file to a file input element.
+
+Input contract:
+- `selector: str` or `element_id: str`
+- `file_path: str` (path to local file)
+
+Output contract:
+- `target: str`
+- `file_name: str`
+- `file_path: str`
+- status message
+
+Constraints:
+- file must exist at the provided path;
+- target must be a file input element;
+- file path should be validated before upload.
+
+Common errors:
+- file not found;
+- target not a file input;
+- upload failed (size limits, etc.).
+
+### Dialog Skills
+
+#### `inspect_dialog`
+
+Purpose:
+- check for and read the content of any active dialog, alert, confirm, or prompt.
+
+Input contract:
+- optional `timeout_ms: int` (default 100)
+
+Output contract:
+- `visible: bool`
+- `dialog_type: str | None` (alert, confirm, prompt, dialog, modal)
+- `message: str | None` (the dialog text content)
+- `default_value: str | None` (for prompt dialogs)
+
+Constraints:
+- should detect both native dialogs and HTML modal dialogs;
+- quick check - not a blocking wait.
+
+Common errors:
+- dialog inspection failed;
+- ambiguous dialog detection.
+
 ### Safety And Confirmation Skills
 
 #### `request_confirmation`
@@ -259,14 +417,21 @@ The MVP skill set is intentionally small. New skills should be added only when:
 - they do not embed a multi-step scenario;
 - they can be explained independently from a specific user task.
 
-Likely later additions:
+Recently added:
 
-- `select_option`
-- `scroll_viewport`
-- `upload_file`
-- `download_file`
-- `read_dialog`
+- `select_option` - select from dropdowns
+- `scroll_viewport` - page and element scrolling
+- `press_key` - keyboard interaction
+- `wait_for_element` - conditional waiting
+- `upload_file` - file input handling
+- `inspect_dialog` - dialog detection
+
+Potential future additions:
+
+- `download_file` - handle file downloads
 - `capture_screenshot` as an explicit user-facing skill if bounded observation screenshots are no longer enough
+- `hover_element` - mouse hover actions
+- `drag_and_drop` - drag-drop interactions
 
 ## Anti-Patterns
 

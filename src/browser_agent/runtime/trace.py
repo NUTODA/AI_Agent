@@ -138,33 +138,152 @@ class TraceRecorder:
         self.markdown_path.write_text(self.as_markdown(), encoding="utf-8")
 
     def as_markdown(self) -> str:
-        """Render a short human-readable summary for debugging and demos."""
+        """Render a demo-readable execution trace with clear step summaries."""
 
-        lines = ["# Runtime Trace"]
+        lines = [
+            "# Browser Agent Execution Trace",
+            "",
+        ]
+
+        # Session header
+        if self.session_id:
+            lines.append(f"**Session ID:** `{self.session_id}`")
+        lines.append(f"**Total Steps:** {len(self.items)}")
+        lines.append(f"**Generated:** {self.items[0].recorded_at.strftime('%Y-%m-%d %H:%M:%S UTC') if self.items else 'N/A'}")
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+
         for item in self.items:
             action_name = item.action_name or (
                 item.planner_decision_type.value
                 if item.planner_decision_type is not None
                 else "unknown"
             )
-            status = item.status.value if item.status else "no_tool_result"
-            lines.append(f"- step `{item.step_index}` `{action_name}` -> `{status}`")
+            status = item.status.value if item.status else "pending"
+
+            # Status indicator
+            status_emoji = ""
+            if status == "success":
+                status_emoji = ""
+            elif status == "error":
+                status_emoji = ""
+            elif status == "waiting_for_confirmation":
+                status_emoji = ""
+            elif status == "blocked":
+                status_emoji = ""
+            elif status == "skipped":
+                status_emoji = ""
+
+            # Step header
+            lines.append(f"## Step {item.step_index + 1}: {action_name} {status_emoji}")
+            lines.append("")
+
+            # Decision info
             if item.planner_decision_type:
-                lines.append(f"  decision: {item.planner_decision_type.value}")
+                lines.append(f"**Decision:** `{item.planner_decision_type.value}`")
+
+            # Action details
+            if item.action_name:
+                lines.append(f"**Skill:** `{item.action_name}`")
+            if item.action_input:
+                # Show concise input summary
+                input_summary = self._summarize_input(item.action_input)
+                if input_summary:
+                    lines.append(f"**Input:** {input_summary}")
+
+            # Rationale (truncated for readability)
             if item.rationale_summary:
-                lines.append(f"  rationale: {item.rationale_summary}")
+                rationale = item.rationale_summary
+                if len(rationale) > 120:
+                    rationale = rationale[:117] + "..."
+                lines.append(f"**Rationale:** {rationale}")
+
+            # Observation (truncated)
             if item.observation_summary:
-                lines.append(f"  observation: {item.observation_summary}")
+                obs = item.observation_summary
+                if len(obs) > 100:
+                    obs = obs[:97] + "..."
+                lines.append(f"**Observation:** {obs}")
+
+            # Page context
+            if item.page_title:
+                lines.append(f"**Page:** {item.page_title}")
             if item.current_url:
-                lines.append(f"  url: {item.current_url}")
+                url_display = item.current_url[:80] + "..." if len(item.current_url) > 80 else item.current_url
+                lines.append(f"**URL:** {url_display}")
+
+            # Result
             if item.output_summary:
-                lines.append(f"  summary: {item.output_summary}")
-            if item.progress_outcome is not None:
-                lines.append(f"  progress: {item.progress_outcome.summary}")
+                lines.append(f"**Result:** {item.output_summary}")
+
+            # Progress
+            if item.progress_outcome:
+                progress_indicator = "" if item.progress_outcome.made_progress else ""
+                lines.append(f"**Progress:** {progress_indicator} {item.progress_outcome.summary}")
+
+            # State transition (highlight pending states)
             if item.state_transition:
-                lines.append(f"  state: {item.state_transition}")
-            if item.report_summary:
-                lines.append(f"  report: {item.report_summary}")
+                if "waiting_for_confirmation" in item.state_transition:
+                    lines.append(f"**State:**  {item.state_transition}")
+                elif "waiting_for_user" in item.state_transition:
+                    lines.append(f"**State:**  {item.state_transition}")
+                elif "completed" in item.state_transition or "success" in item.state_transition:
+                    lines.append(f"**State:**  {item.state_transition}")
+                elif "failed" in item.state_transition:
+                    lines.append(f"**State:**  {item.state_transition}")
+                else:
+                    lines.append(f"**State:** {item.state_transition}")
+
+            # Error details
             if item.error_message:
-                lines.append(f"  error: {item.error_message}")
+                lines.append(f"**Error:** {item.error_message}")
+
+            # Performance
+            if item.duration_ms is not None:
+                lines.append(f"**Duration:** {item.duration_ms}ms")
+
+            # Artifacts
+            if item.artifacts:
+                lines.append(f"**Artifacts:** {', '.join(item.artifacts)}")
+
+            # Separator between steps
+            lines.append("")
+            lines.append("---")
+            lines.append("")
+
+        # Final summary if available
+        if self.items:
+            last_item = self.items[-1]
+            if last_item.report_summary:
+                lines.append("## Final Summary")
+                lines.append("")
+                lines.append(last_item.report_summary)
+                lines.append("")
+
         return "\n".join(lines)
+
+    def _summarize_input(self, action_input: dict) -> str | None:
+        """Create a concise summary of action input parameters."""
+
+        if not action_input:
+            return None
+
+        # Key fields to display for common skills
+        priority_fields = [
+            "selector", "element_id", "url", "text", "key",
+            "direction", "option_text", "option_value", "file_path"
+        ]
+
+        parts = []
+        for field in priority_fields:
+            if field in action_input and action_input[field]:
+                value = str(action_input[field])
+                # Truncate long values
+                if len(value) > 40:
+                    value = value[:37] + "..."
+                parts.append(f"{field}={value}")
+                if len(parts) >= 3:  # Limit to 3 parameters
+                    break
+
+        return ", ".join(parts) if parts else None

@@ -5,12 +5,20 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from browser_agent.skills.base import BaseSkill
-from browser_agent.skills.interaction import ClickElementSkill, TypeTextSkill
-from browser_agent.skills.navigation import NavigateSkill
+from browser_agent.skills.dialog import InspectDialogSkill
+from browser_agent.skills.file_handling import UploadFileSkill
+from browser_agent.skills.interaction import (
+    ClickElementSkill,
+    PressKeySkill,
+    SelectOptionSkill,
+    TypeTextSkill,
+)
+from browser_agent.skills.navigation import NavigateSkill, ScrollViewportSkill
 from browser_agent.skills.observation import (
     ExtractPageTextSkill,
     GetInteractiveElementsSkill,
     ObservePageSkill,
+    WaitForElementSkill,
 )
 from browser_agent.skills.reporting import FinishTaskSkill
 from browser_agent.skills.safety import RequestConfirmationSkill
@@ -51,12 +59,24 @@ def build_default_registry() -> SkillRegistry:
 
     registry = SkillRegistry()
     for skill in (
+        # Observation skills
         ObservePageSkill(),
         GetInteractiveElementsSkill(),
+        ExtractPageTextSkill(),
+        WaitForElementSkill(),
+        # Navigation skills
+        NavigateSkill(),
+        ScrollViewportSkill(),
+        # Interaction skills
         ClickElementSkill(),
         TypeTextSkill(),
-        NavigateSkill(),
-        ExtractPageTextSkill(),
+        SelectOptionSkill(),
+        PressKeySkill(),
+        # File handling skills
+        UploadFileSkill(),
+        # Dialog skills
+        InspectDialogSkill(),
+        # Safety and reporting skills
         RequestConfirmationSkill(),
         FinishTaskSkill(),
     ):

@@ -177,6 +177,63 @@ This repository still does not claim unrestricted general autonomy. The loop is 
 - `docs/rules.md`
 - `docs/roadmap.md`
 
+## Running Controlled Demos
+
+The repository includes controlled demo pages for reproducible testing and demonstrations.
+
+### Start the Demo Server
+
+```bash
+python demos/server.py
+```
+
+The server will start on port 8765 and print URLs for all demo pages.
+
+### Available Demos
+
+1. **Inbox Management** (`http://localhost:8765/inbox_demo.html`)
+   - Demonstrates email list interaction, spam marking, filtering
+   - Shows confirmation flow for destructive actions
+
+2. **Food Ordering** (`http://localhost:8765/food_demo.html`)
+   - Demonstrates cart management, form filling, multi-step checkout
+   - Shows navigation between different page states
+
+3. **Job Applications** (`http://localhost:8765/jobs_demo.html`)
+   - Demonstrates filtering, form submission, file upload
+   - Shows modal dialog interactions
+
+### Example CLI Commands for Demos
+
+```bash
+# Demo 1: Inbox - mark spam emails
+browser-agent --start-url http://localhost:8765/inbox_demo.html \
+  "Mark the suspicious emails as spam"
+
+# Demo 2: Food - place an order
+browser-agent --start-url http://localhost:8765/food_demo.html \
+  "Order a Classic Burger and Soft Drink, then proceed to checkout"
+
+# Demo 3: Jobs - apply for a position
+browser-agent --start-url http://localhost:8765/jobs_demo.html \
+  "Filter for remote jobs and apply to the Senior Frontend Developer position"
+```
+
+### What the Demos Show
+
+- **Generic browser interaction**: All actions use generic skills (click, type, observe, scroll)
+- **Planner-based decisions**: The agent observes and plans each step based on current page state
+- **Confirmation flow**: Risky actions pause for user approval
+- **Interactive resume**: CLI prompts for user input when the agent needs clarification
+- **Clear reporting**: Final reports show all steps, actions, and outcomes
+
+See `docs/demo.md` for comprehensive demo documentation.
+
 ## Next Steps
 
-The next milestone is to improve resume UX, expand the reusable skill set, and harden planner behavior on more dynamic real-world pages without introducing task-specific scripts.
+The project is now demo-ready with CLI resume flow, expanded generic skills, and controlled demo pages. The remaining work is focused on:
+
+- Polish and edge-case handling
+- Additional provider integrations
+- Performance optimizations
+- Extended test coverage

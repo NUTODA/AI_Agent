@@ -18,7 +18,7 @@ from browser_agent.runtime.loop import RuntimeLoop
 from browser_agent.runtime.models import FinalReport, RuntimeStatus, UserTask
 from browser_agent.runtime.session import RuntimeSession
 from browser_agent.runtime.trace import TraceRecorder
-from browser_agent.safety.confirmations import ConfirmationManager
+from browser_agent.safety.confirmations import ConfirmationDecision, ConfirmationManager
 from browser_agent.safety.guardrails import SafetyGuardrails
 from browser_agent.skills.registry import build_default_registry
 
@@ -69,42 +69,188 @@ def build_browser_engine(settings: RuntimeSettings) -> PlaywrightBrowserEngine:
 
 
 def render_text_report(report: FinalReport, *, session: RuntimeSession | None = None) -> str:
-    """Format a readable terminal summary."""
+    """Format a demo-readable terminal summary."""
+
+    # Status indicator
+    status_emoji = ""
+    if report.status == RuntimeStatus.COMPLETED:
+        status_emoji = ""
+    elif report.status == RuntimeStatus.FAILED:
+        status_emoji = ""
+    elif report.status == RuntimeStatus.STOPPED:
+        status_emoji = ""
+    elif report.status in (RuntimeStatus.WAITING_FOR_CONFIRMATION, RuntimeStatus.WAITING_FOR_USER):
+        status_emoji = ""
 
     lines = [
-        "Browser Agent",
-        "=============",
-        f"Status: {report.status.value}",
-        f"Steps: {report.step_count}",
-        f"Summary: {report.summary}",
+        "",
+        "╔══════════════════════════════════════════════════════════════╗",
+        "║                    BROWSER AGENT RESULT                      ║",
+        "╚══════════════════════════════════════════════════════════════╝",
+        "",
     ]
+
+    # Status block
+    lines.append(f"Status:   {status_emoji} {report.status.value.upper()}")
+    lines.append(f"Outcome:  {'Completed' if report.completed else 'Incomplete'}")
+    lines.append(f"Steps:    {report.step_count}")
+    lines.append("")
+
+    # Task summary
+    if report.summary:
+        lines.append("─" * 60)
+        lines.append("SUMMARY")
+        lines.append("─" * 60)
+        lines.append(report.summary)
+        lines.append("")
+
+    # Original task context (if available in session)
+    if session is not None:
+        lines.append("─" * 60)
+        lines.append("ORIGINAL TASK")
+        lines.append("─" * 60)
+        lines.append(session.task.request)
+        lines.append("")
+
+    # Actions taken
+    if report.actions_taken:
+        lines.append("─" * 60)
+        lines.append("ACTIONS TAKEN")
+        lines.append("─" * 60)
+        for i, action in enumerate(report.actions_taken, 1):
+            lines.append(f"  {i}. {action}")
+        lines.append("")
+
+    # Step trace with details
     if session is not None and session.trace_items:
-        lines.append("Step trace:")
+        lines.append("─" * 60)
+        lines.append("EXECUTION TRACE")
+        lines.append("─" * 60)
         for item in session.trace_items:
             chosen_action = item.action_name or (
                 item.planner_decision_type.value if item.planner_decision_type else "none"
             )
-            item_status = item.status.value if item.status else "no_tool_result"
-            lines.append(f"- step {item.step_index}: {chosen_action} -> {item_status}")
-    if report.actions_taken:
-        lines.append(f"Actions: {', '.join(report.actions_taken)}")
+            item_status = item.status.value if item.status else "pending"
+
+            # Status indicator for each step
+            step_emoji = ""
+            if item_status == "success":
+                step_emoji = ""
+            elif item_status == "error":
+                step_emoji = ""
+            elif item_status == "waiting_for_confirmation":
+                step_emoji = ""
+
+            lines.append(f"  Step {item.step_index + 1}: {chosen_action} {step_emoji}")
+
+            if item.rationale_summary:
+                rationale = item.rationale_summary
+                if len(rationale) > 70:
+                    rationale = rationale[:67] + "..."
+                lines.append(f"    └─ {rationale}")
+
+            if item.current_url and item.step_index == 0:
+                url_display = item.current_url[:60] + "..." if len(item.current_url) > 60 else item.current_url
+                lines.append(f"    └─ URL: {url_display}")
+
+            if item.progress_outcome and not item.progress_outcome.made_progress:
+                lines.append(f"    ⚠ No progress detected")
+        lines.append("")
+
+    # Confirmations requested
+    confirmations_requested = []
+    if session is not None:
+        for item in session.trace_items:
+            if item.state_transition and "waiting_for_confirmation" in item.state_transition:
+                if item.action_name:
+                    confirmations_requested.append(item.action_name)
+
+    if confirmations_requested:
+        lines.append("─" * 60)
+        lines.append("CONFIRMATIONS REQUESTED")
+        lines.append("─" * 60)
+        for action in confirmations_requested:
+            lines.append(f"  • {action}")
+        lines.append("")
+
+    # Pending states (if session is still active)
     if report.pending_confirmation is not None:
-        lines.append("Pending confirmation:")
-        lines.append(f"- {report.pending_confirmation.prompt}")
+        lines.append("─" * 60)
+        lines.append("PENDING CONFIRMATION")
+        lines.append("─" * 60)
+        lines.append(f"  Action: {report.pending_confirmation.action_name}")
+        lines.append(f"  Reason: {report.pending_confirmation.reason}")
+        if report.pending_confirmation.consequences:
+            lines.append("  Consequences:")
+            for consequence in report.pending_confirmation.consequences:
+                lines.append(f"    - {consequence}")
+        lines.append(f"\n  Prompt: {report.pending_confirmation.prompt}")
+        lines.append("")
+
     if report.pending_user_question is not None:
-        lines.append("Pending user question:")
-        lines.append(f"- {report.pending_user_question.question}")
+        lines.append("─" * 60)
+        lines.append("PENDING USER QUESTION")
+        lines.append("─" * 60)
+        lines.append(f"  {report.pending_user_question.question}")
+        lines.append("")
+
+    # Open questions
     if report.open_questions:
-        lines.append("Open questions:")
-        lines.extend(f"- {item}" for item in report.open_questions)
+        lines.append("─" * 60)
+        lines.append("OPEN QUESTIONS")
+        lines.append("─" * 60)
+        for item in report.open_questions:
+            lines.append(f"  • {item}")
+        lines.append("")
+
+    # Next steps / recommendations
     if report.next_steps:
-        lines.append("Next steps:")
-        lines.extend(f"- {item}" for item in report.next_steps)
+        lines.append("─" * 60)
+        lines.append("RECOMMENDED NEXT STEPS")
+        lines.append("─" * 60)
+        for item in report.next_steps:
+            lines.append(f"  → {item}")
+        lines.append("")
+
+    # Final URL
     if report.final_url:
-        lines.append(f"Final URL: {report.final_url}")
+        lines.append("─" * 60)
+        lines.append("FINAL URL")
+        lines.append("─" * 60)
+        lines.append(f"  {report.final_url}")
+        lines.append("")
+
+    # Artifacts
     if report.artifact_refs:
-        lines.append("Artifacts:")
-        lines.extend(f"- {item}" for item in report.artifact_refs)
+        lines.append("─" * 60)
+        lines.append("ARTIFACTS")
+        lines.append("─" * 60)
+        for item in report.artifact_refs:
+            lines.append(f"  📄 {item}")
+        lines.append("")
+
+    # Session metadata
+    if report.failure_reason:
+        lines.append("─" * 60)
+        lines.append("FAILURE REASON")
+        lines.append("─" * 60)
+        lines.append(f"  {report.failure_reason}")
+        lines.append("")
+
+    if report.completion_reason:
+        lines.append("─" * 60)
+        lines.append("COMPLETION REASON")
+        lines.append("─" * 60)
+        lines.append(f"  {report.completion_reason}")
+        lines.append("")
+
+    # Footer
+    lines.append("═" * 60)
+    lines.append(f"Session ID: {report.session_id}")
+    lines.append(f"Generated: {report.generated_at.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+    lines.append("═" * 60)
+    lines.append("")
+
     return "\n".join(lines)
 
 
@@ -202,12 +348,125 @@ def run_cli(argv: Sequence[str] | None = None) -> FinalReport:
         confirmation_manager=ConfirmationManager(),
         trace_recorder=TraceRecorder(trace_dir=settings.trace_dir),
     )
-    report = loop.run(session)
+    report = run_cli_interactive(loop, session, args_json=args.json)
 
     if args.json:
         print(json.dumps(report.model_dump(mode="json"), indent=2))
     else:
         print(render_text_report(report, session=session))
+    return report
+
+
+def prompt_for_confirmation(report: FinalReport) -> ConfirmationDecision | None:
+    """Display a confirmation request and capture user response."""
+
+    if report.pending_confirmation is None:
+        return None
+
+    request = report.pending_confirmation
+    print("\n" + "=" * 60)
+    print("CONFIRMATION REQUIRED")
+    print("=" * 60)
+    print(f"Action: {request.action_name}")
+    print(f"Reason: {request.reason}")
+    print(f"Risk Level: {request.risk_level.value}")
+    if request.consequences:
+        print("Potential consequences:")
+        for consequence in request.consequences:
+            print(f"  - {consequence}")
+    print(f"\n{request.prompt}")
+    print("-" * 60)
+
+    while True:
+        response = input("Approve? (yes/no): ").strip().lower()
+        if response in ("yes", "y"):
+            return ConfirmationDecision(
+                request_id=request.request_id,
+                approved=True,
+            )
+        if response in ("no", "n"):
+            notes = input("Reason for rejection (optional): ").strip()
+            return ConfirmationDecision(
+                request_id=request.request_id,
+                approved=False,
+                reviewer_notes=notes if notes else None,
+            )
+        print("Please enter 'yes' or 'no'.")
+
+
+def prompt_for_user_answer(report: FinalReport) -> str | None:
+    """Display a user question and capture the answer."""
+
+    if report.pending_user_question is None:
+        return None
+
+    question = report.pending_user_question
+    print("\n" + "=" * 60)
+    print("USER INPUT REQUIRED")
+    print("=" * 60)
+    print(f"Question: {question.question}")
+    print("-" * 60)
+
+    answer = input("Your answer: ").strip()
+    return answer if answer else None
+
+
+def is_terminal_status(status: RuntimeStatus) -> bool:
+    """Check if the runtime has reached a terminal state."""
+
+    return status in {
+        RuntimeStatus.COMPLETED,
+        RuntimeStatus.STOPPED,
+        RuntimeStatus.FAILED,
+    }
+
+
+def run_cli_interactive(
+    loop: RuntimeLoop,
+    session: RuntimeSession,
+    args_json: bool,
+) -> FinalReport:
+    """Run the CLI with interactive resume support for pending states."""
+
+    report = loop.run(session)
+
+    # Handle pending states with interactive prompts
+    while not is_terminal_status(report.status):
+        if report.status == RuntimeStatus.WAITING_FOR_CONFIRMATION:
+            if args_json:
+                # In JSON mode, we can't interact, so return the pending report
+                print(json.dumps(report.model_dump(mode="json"), indent=2))
+                return report
+
+            decision = prompt_for_confirmation(report)
+            if decision is None:
+                # Should not happen, but handle gracefully
+                break
+
+            if decision.approved:
+                print("\n[Approved] Continuing execution...")
+            else:
+                print("\n[Rejected] Stopping execution...")
+
+            report = loop.continue_after_confirmation(session, decision)
+
+        elif report.status == RuntimeStatus.WAITING_FOR_USER:
+            if args_json:
+                # In JSON mode, we can't interact, so return the pending report
+                print(json.dumps(report.model_dump(mode="json"), indent=2))
+                return report
+
+            answer = prompt_for_user_answer(report)
+            if answer is None:
+                answer = ""
+
+            print(f"\n[Answer received] Continuing execution...")
+            report = loop.continue_after_user_answer(session, answer)
+
+        else:
+            # Unknown state, break to avoid infinite loop
+            break
+
     return report
 
 

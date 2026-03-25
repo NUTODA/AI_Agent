@@ -31,6 +31,13 @@ PLANNER_SYSTEM_PROMPT = dedent(
     - Request confirmation before risky or destructive actions.
     - Finish only when the task is sufficiently supported by observed evidence.
 
+    IMPORTANT - Selector usage for click_element and type_text:
+    - ALWAYS use the exact selector values provided in the Current observation's interactive_elements.
+    - Prefer data-testid selectors when available (e.g., '[data-testid="add-burger"]').
+    - Playwright does NOT support jQuery selectors like :contains().
+    - Valid selector formats: CSS selectors, text selectors (text="..."), role selectors.
+    - When multiple elements match, use the most specific selector from the observation.
+
     Decision types:
     - act: execute exactly one registered skill next.
     - ask_user: pause and ask the operator a concrete blocking question.

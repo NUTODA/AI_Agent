@@ -126,27 +126,61 @@ Status:
 
 ## Stage 6: Demo Scenarios
 
-Deliverables:
+**Status: COMPLETED** - The system is now demo-ready with comprehensive capabilities.
 
-- scenario validation for inbox cleanup, food ordering, and job workflows;
-- demo scripts and operator guidance;
-- scenario-level readiness notes and known gaps.
+### Delivered:
 
-Risks:
+**CLI Resume Flow:**
+- Full interactive support for `waiting_for_confirmation` state
+- User input handling for `waiting_for_user` questions
+- Loop continuation after user responses
+- Honest UX with no auto-confirmations or fake completions
 
-- accidentally encoding scenario-specific logic into the core runtime;
-- poor handling of login, captchas, or dynamic site states;
-- demo instability caused by external sites.
+**Extended Generic Skills (6 new atomic capabilities):**
+- `select_option` - Dropdown/select element interaction
+- `scroll_viewport` - Page and element scrolling
+- `press_key` - Keyboard key presses
+- `wait_for_element` - Conditional element waiting
+- `upload_file` - File input handling
+- `inspect_dialog` - Dialog/alert detection
 
-Readiness criteria:
+**Controlled Demo Environment:**
+- `inbox_demo.html` - Email management (spam/important marking, filtering)
+- `food_demo.html` - Restaurant ordering (menu, cart, checkout flow)
+- `jobs_demo.html` - Job board (filtering, application forms)
+- `demos/server.py` - HTTP server for demo pages
+- All demos use `data-testid` attributes and work without external dependencies
 
-- demos prove the general architecture rather than a hidden scripted flow;
-- the agent can pause for confirmation or clarification naturally;
-- scenario notes document assumptions and limits.
+**Enhanced Trace and Reporting:**
+- Demo-readable markdown trace output
+- Improved final report with status indicators and visual formatting
+- Clear step summaries, rationale, and progress tracking
+- Better structured output for human consumption
 
-Current note:
+**Documentation:**
+- `docs/demo.md` - Comprehensive demo guide with example tasks
+- Updated `README.md` with demo instructions
+- `demos/README.md` - Demo pages documentation
+- Updated `docs/skills.md` with new skill documentation
 
-- the core runtime now supports multi-step planning and pause states without task-specific code, but scenario depth still depends on the current generic skill set.
+### What Was Avoided (Per Constraints):
+
+- No task-specific scenarios in runtime logic
+- No site-specific `if/else` logic
+- No encoded scenario-specific knowledge in planner
+- No brittle tests on external sites
+- All demos work entirely locally without internet access
+
+### Current State:
+
+The agent can now:
+1. Execute generic browser interactions across diverse page types
+2. Pause for user confirmation on risky actions
+3. Ask the user clarifying questions when needed
+4. Produce clear, demo-ready trace and report output
+5. Demonstrate real planner-based decision making
+
+The demos prove the general architecture rather than hidden scripted flows.
 
 ## Stage 7: Polishing
 

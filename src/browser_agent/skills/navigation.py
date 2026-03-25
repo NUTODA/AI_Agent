@@ -60,3 +60,77 @@ class NavigateSkill(BaseSkill):
             message=result.message,
             observation=page_state.to_agent_observation(),
         )
+
+
+class ScrollViewportInput(BaseModel):
+    """Input contract for scrolling the page or an element."""
+
+    direction: str = "down"  # up, down, left, right
+    amount: int = 500  # pixels
+    selector: str | None = None  # if None, scrolls the main viewport
+
+
+class ScrollViewportOutput(BaseModel):
+    """Output contract for scroll execution."""
+
+    direction: str
+    amount: int
+    target: str | None = None
+    scroll_x: int = 0
+    scroll_y: int = 0
+    message: str
+    page_title: str | None = None
+    observation: AgentObservation | None = None
+
+
+class ScrollViewportSkill(BaseSkill):
+    """Scroll the page viewport or a specific element."""
+
+    name = "scroll_viewport"
+    description = "Scroll the page or a specific element up, down, left, or right by a specified amount of pixels."
+    input_schema = ScrollViewportInput
+    output_schema = ScrollViewportOutput
+
+    def execute(
+        self,
+        context: SkillContext,
+        payload: ScrollViewportInput,
+    ) -> ScrollViewportOutput:
+        try:
+            result = raise_for_browser_result(
+                context.browser.scroll_viewport(
+                    direction=payload.direction,
+                    amount=payload.amount,
+                    target=payload.selector,
+                ),
+                default_error_code="scroll_failed",
+            )
+        except SkillExecutionError:
+            raise
+        except Exception as exc:
+            raise SkillExecutionError(
+                message=f"Failed to scroll {payload.direction}.",
+                error_code="scroll_failed",
+                data={
+                    "direction": payload.direction,
+                    "amount": payload.amount,
+                    "target": payload.selector,
+                    "details": str(exc),
+                },
+            ) from exc
+        observation = (
+            result.page_state.to_agent_observation()
+            if result.page_state is not None
+            else None
+        )
+        metadata = result.metadata or {}
+        return ScrollViewportOutput(
+            direction=payload.direction,
+            amount=payload.amount,
+            target=payload.selector,
+            scroll_x=metadata.get("scroll_x", 0),
+            scroll_y=metadata.get("scroll_y", 0),
+            message=result.message,
+            page_title=result.page_state.title if result.page_state else None,
+            observation=observation,
+        )

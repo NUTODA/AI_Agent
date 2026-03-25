@@ -1,0 +1,599 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Food Order Demo - Browser Agent</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: #f5f5f5;
+            min-height: 100vh;
+        }
+        .header {
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        .header h1 { font-size: 2.5rem; margin-bottom: 10px; }
+        .header p { opacity: 0.9; font-size: 1.1rem; }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 30px;
+            display: grid;
+            grid-template-columns: 2fr 1fr;
+            gap: 30px;
+        }
+        .menu-section h2 {
+            color: #333;
+            margin-bottom: 20px;
+            font-size: 1.5rem;
+        }
+        .menu-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 20px;
+        }
+        .menu-item {
+            background: white;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        .menu-item:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 8px 16px rgba(0,0,0,0.15);
+        }
+        .item-image {
+            height: 160px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-size: 3rem;
+        }
+        .item-content { padding: 20px; }
+        .item-name {
+            font-size: 1.2rem;
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 8px;
+        }
+        .item-description {
+            color: #666;
+            font-size: 0.9rem;
+            margin-bottom: 15px;
+            line-height: 1.5;
+        }
+        .item-footer {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .item-price {
+            font-size: 1.3rem;
+            font-weight: bold;
+            color: #f5576c;
+        }
+        .add-btn {
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 25px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: opacity 0.2s;
+        }
+        .add-btn:hover { opacity: 0.9; }
+        .add-btn:active { transform: scale(0.98); }
+        .cart-section {
+            position: sticky;
+            top: 30px;
+        }
+        .cart-container {
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            padding: 25px;
+        }
+        .cart-title {
+            font-size: 1.3rem;
+            color: #333;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .cart-title span {
+            background: #f5576c;
+            color: white;
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 0.9rem;
+        }
+        .cart-empty {
+            text-align: center;
+            color: #999;
+            padding: 40px 0;
+        }
+        .cart-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 15px 0;
+            border-bottom: 1px solid #eee;
+        }
+        .cart-item-info { flex: 1; }
+        .cart-item-name {
+            font-weight: 500;
+            color: #333;
+            margin-bottom: 5px;
+        }
+        .cart-item-price {
+            color: #f5576c;
+            font-size: 0.9rem;
+        }
+        .cart-item-qty {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .qty-btn {
+            width: 28px;
+            height: 28px;
+            border: 1px solid #ddd;
+            background: white;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: bold;
+            color: #666;
+        }
+        .qty-btn:hover { background: #f5f5f5; }
+        .qty-value { font-weight: 600; color: #333; }
+        .remove-btn {
+            color: #f5576c;
+            background: none;
+            border: none;
+            cursor: pointer;
+            font-size: 1.2rem;
+            margin-left: 10px;
+        }
+        .cart-total {
+            margin-top: 20px;
+            padding-top: 20px;
+            border-top: 2px solid #eee;
+        }
+        .total-row {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 10px;
+            color: #666;
+        }
+        .total-row.final {
+            font-size: 1.2rem;
+            font-weight: bold;
+            color: #333;
+        }
+        .checkout-btn {
+            width: 100%;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 15px;
+            border-radius: 8px;
+            font-size: 1.1rem;
+            font-weight: 600;
+            cursor: pointer;
+            margin-top: 20px;
+            transition: opacity 0.2s;
+        }
+        .checkout-btn:hover { opacity: 0.9; }
+        .checkout-btn:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+
+        /* Checkout Form Styles */
+        .checkout-section {
+            display: none;
+            max-width: 600px;
+            margin: 30px auto;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            padding: 40px;
+        }
+        .checkout-section.active { display: block; }
+        .checkout-section h2 {
+            color: #333;
+            margin-bottom: 30px;
+            text-align: center;
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            color: #555;
+            font-weight: 500;
+        }
+        .form-group input {
+            width: 100%;
+            padding: 12px 15px;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            font-size: 1rem;
+            transition: border-color 0.2s;
+        }
+        .form-group input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        .form-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+        .back-btn {
+            background: none;
+            border: 1px solid #ddd;
+            color: #666;
+            padding: 12px 25px;
+            border-radius: 8px;
+            cursor: pointer;
+            margin-right: 10px;
+        }
+        .pay-btn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 12px 40px;
+            border-radius: 8px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+        .confirmation-section {
+            display: none;
+            max-width: 600px;
+            margin: 30px auto;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            padding: 60px 40px;
+            text-align: center;
+        }
+        .confirmation-section.active { display: block; }
+        .confirmation-icon {
+            font-size: 4rem;
+            margin-bottom: 20px;
+        }
+        .confirmation-section h2 {
+            color: #333;
+            margin-bottom: 15px;
+        }
+        .confirmation-section p {
+            color: #666;
+            margin-bottom: 30px;
+        }
+        .order-summary {
+            background: #f8f9fa;
+            border-radius: 8px;
+            padding: 20px;
+            margin: 20px 0;
+            text-align: left;
+        }
+        .order-summary h3 {
+            color: #333;
+            margin-bottom: 15px;
+        }
+        @media (max-width: 900px) {
+            .container { grid-template-columns: 1fr; }
+            .cart-section { position: static; }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1 data-testid="restaurant-name">Tasty Bites Restaurant</h1>
+        <p>Demo page for food ordering tasks</p>
+    </div>
+
+    <div class="container" id="menu-view">
+        <div class="menu-section">
+            <h2>Our Menu</h2>
+            <div class="menu-grid" data-testid="menu-grid">
+                <div class="menu-item" data-testid="item-burger">
+                    <div class="item-image">🍔</div>
+                    <div class="item-content">
+                        <div class="item-name" data-testid="burger-name">Classic Burger</div>
+                        <div class="item-description">Juicy beef patty with lettuce, tomato, cheese, and special sauce</div>
+                        <div class="item-footer">
+                            <div class="item-price" data-testid="burger-price">$12.99</div>
+                            <button class="add-btn" data-testid="add-burger" onclick="addToCart('Classic Burger', 12.99)">Add to Cart</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="menu-item" data-testid="item-pizza">
+                    <div class="item-image">🍕</div>
+                    <div class="item-content">
+                        <div class="item-name" data-testid="pizza-name">Margherita Pizza</div>
+                        <div class="item-description">Fresh mozzarella, tomato sauce, and basil on thin crust</div>
+                        <div class="item-footer">
+                            <div class="item-price" data-testid="pizza-price">$14.99</div>
+                            <button class="add-btn" data-testid="add-pizza" onclick="addToCart('Margherita Pizza', 14.99)">Add to Cart</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="menu-item" data-testid="item-pasta">
+                    <div class="item-image">🍝</div>
+                    <div class="item-content">
+                        <div class="item-name" data-testid="pasta-name">Creamy Pasta</div>
+                        <div class="item-description">Fettuccine in rich Alfredo sauce with parmesan</div>
+                        <div class="item-footer">
+                            <div class="item-price" data-testid="pasta-price">$13.99</div>
+                            <button class="add-btn" data-testid="add-pasta" onclick="addToCart('Creamy Pasta', 13.99)">Add to Cart</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="menu-item" data-testid="item-salad">
+                    <div class="item-image">🥗</div>
+                    <div class="item-content">
+                        <div class="item-name" data-testid="salad-name">Caesar Salad</div>
+                        <div class="item-description">Crisp romaine, croutons, parmesan with Caesar dressing</div>
+                        <div class="item-footer">
+                            <div class="item-price" data-testid="salad-price">$9.99</div>
+                            <button class="add-btn" data-testid="add-salad" onclick="addToCart('Caesar Salad', 9.99)">Add to Cart</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="menu-item" data-testid="item-drink">
+                    <div class="item-image">🥤</div>
+                    <div class="item-content">
+                        <div class="item-name" data-testid="drink-name">Soft Drink</div>
+                        <div class="item-description">Refreshing cola, lemon-lime, or orange soda</div>
+                        <div class="item-footer">
+                            <div class="item-price" data-testid="drink-price">$2.99</div>
+                            <button class="add-btn" data-testid="add-drink" onclick="addToCart('Soft Drink', 2.99)">Add to Cart</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="menu-item" data-testid="item-dessert">
+                    <div class="item-image">🍰</div>
+                    <div class="item-content">
+                        <div class="item-name" data-testid="dessert-name">Chocolate Cake</div>
+                        <div class="item-description">Rich chocolate layer cake with ganache frosting</div>
+                        <div class="item-footer">
+                            <div class="item-price" data-testid="dessert-price">$6.99</div>
+                            <button class="add-btn" data-testid="add-dessert" onclick="addToCart('Chocolate Cake', 6.99)">Add to Cart</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="cart-section">
+            <div class="cart-container">
+                <div class="cart-title">
+                    Your Cart
+                    <span data-testid="cart-count">0</span>
+                </div>
+                <div class="cart-items" data-testid="cart-items">
+                    <div class="cart-empty">Your cart is empty</div>
+                </div>
+                <div class="cart-total" data-testid="cart-total-section" style="display: none;">
+                    <div class="total-row">
+                        <span>Subtotal</span>
+                        <span data-testid="subtotal">$0.00</span>
+                    </div>
+                    <div class="total-row">
+                        <span>Tax (8%)</span>
+                        <span data-testid="tax">$0.00</span>
+                    </div>
+                    <div class="total-row final">
+                        <span>Total</span>
+                        <span data-testid="total">$0.00</span>
+                    </div>
+                </div>
+                <button class="checkout-btn" data-testid="checkout-btn" onclick="showCheckout()" disabled>Proceed to Checkout</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Checkout Form -->
+    <div class="checkout-section" id="checkout-view">
+        <h2>Checkout</h2>
+        <form id="checkout-form" onsubmit="handlePayment(event)">
+            <div class="form-group">
+                <label for="name">Full Name</label>
+                <input type="text" id="name" data-testid="checkout-name" required placeholder="John Doe">
+            </div>
+            <div class="form-group">
+                <label for="email">Email Address</label>
+                <input type="email" id="email" data-testid="checkout-email" required placeholder="john@example.com">
+            </div>
+            <div class="form-group">
+                <label for="phone">Phone Number</label>
+                <input type="tel" id="phone" data-testid="checkout-phone" required placeholder="(555) 123-4567">
+            </div>
+            <div class="form-group">
+                <label for="card">Card Number</label>
+                <input type="text" id="card" data-testid="checkout-card" required placeholder="1234 5678 9012 3456">
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="expiry">Expiry Date</label>
+                    <input type="text" id="expiry" data-testid="checkout-expiry" required placeholder="MM/YY">
+                </div>
+                <div class="form-group">
+                    <label for="cvv">CVV</label>
+                    <input type="text" id="cvv" data-testid="checkout-cvv" required placeholder="123">
+                </div>
+            </div>
+            <div style="text-align: center; margin-top: 30px;">
+                <button type="button" class="back-btn" data-testid="back-to-menu" onclick="showMenu()">Back to Menu</button>
+                <button type="submit" class="pay-btn" data-testid="pay-btn">Complete Payment</button>
+            </div>
+        </form>
+    </div>
+
+    <!-- Confirmation -->
+    <div class="confirmation-section" id="confirmation-view">
+        <div class="confirmation-icon">🎉</div>
+        <h2>Order Confirmed!</h2>
+        <p>Thank you for your order. Your delicious food is being prepared.</p>
+        <div class="order-summary">
+            <h3>Order Details</h3>
+            <div id="order-details"></div>
+            <div style="margin-top: 15px; padding-top: 15px; border-top: 1px solid #ddd;">
+                <strong>Total: <span id="order-total">$0.00</span></strong>
+            </div>
+        </div>
+        <button class="checkout-btn" data-testid="new-order-btn" onclick="resetOrder()">Place Another Order</button>
+    </div>
+
+    <script>
+        let cart = JSON.parse(localStorage.getItem('food_cart')) || {};
+
+        function saveCart() {
+            localStorage.setItem('food_cart', JSON.stringify(cart));
+            updateCartUI();
+        }
+
+        function addToCart(name, price) {
+            if (cart[name]) {
+                cart[name].qty++;
+            } else {
+                cart[name] = { price, qty: 1 };
+            }
+            saveCart();
+        }
+
+        function updateQty(name, delta) {
+            if (cart[name]) {
+                cart[name].qty += delta;
+                if (cart[name].qty <= 0) {
+                    delete cart[name];
+                }
+                saveCart();
+            }
+        }
+
+        function removeFromCart(name) {
+            delete cart[name];
+            saveCart();
+        }
+
+        function updateCartUI() {
+            const cartItems = document.querySelector('[data-testid="cart-items"]');
+            const cartCount = document.querySelector('[data-testid="cart-count"]');
+            const cartTotalSection = document.querySelector('[data-testid="cart-total-section"]');
+            const checkoutBtn = document.querySelector('[data-testid="checkout-btn"]');
+
+            const items = Object.entries(cart);
+            const totalItems = items.reduce((sum, [_, item]) => sum + item.qty, 0);
+
+            cartCount.textContent = totalItems;
+
+            if (totalItems === 0) {
+                cartItems.innerHTML = '<div class="cart-empty">Your cart is empty</div>';
+                cartTotalSection.style.display = 'none';
+                checkoutBtn.disabled = true;
+            } else {
+                cartTotalSection.style.display = 'block';
+                checkoutBtn.disabled = false;
+
+                let subtotal = 0;
+                cartItems.innerHTML = items.map(([name, item]) => {
+                    subtotal += item.price * item.qty;
+                    return `
+                        <div class="cart-item" data-testid="cart-item-${name.toLowerCase().replace(/\s+/g, '-')}">
+                            <div class="cart-item-info">
+                                <div class="cart-item-name">${name}</div>
+                                <div class="cart-item-price">$${item.price.toFixed(2)} each</div>
+                            </div>
+                            <div class="cart-item-qty">
+                                <button class="qty-btn" data-testid="dec-${name.toLowerCase().replace(/\s+/g, '-')}" onclick="updateQty('${name}', -1)">−</button>
+                                <span class="qty-value" data-testid="qty-${name.toLowerCase().replace(/\s+/g, '-')}">${item.qty}</span>
+                                <button class="qty-btn" data-testid="inc-${name.toLowerCase().replace(/\s+/g, '-')}" onclick="updateQty('${name}', 1)">+</button>
+                                <button class="remove-btn" data-testid="remove-${name.toLowerCase().replace(/\s+/g, '-')}" onclick="removeFromCart('${name}')">×</button>
+                            </div>
+                        </div>
+                    `;
+                }).join('');
+
+                const tax = subtotal * 0.08;
+                const total = subtotal + tax;
+
+                document.querySelector('[data-testid="subtotal"]').textContent = `$${subtotal.toFixed(2)}`;
+                document.querySelector('[data-testid="tax"]').textContent = `$${tax.toFixed(2)}`;
+                document.querySelector('[data-testid="total"]').textContent = `$${total.toFixed(2)}`;
+            }
+        }
+
+        function showCheckout() {
+            document.getElementById('menu-view').style.display = 'none';
+            document.getElementById('checkout-view').classList.add('active');
+            document.getElementById('confirmation-view').classList.remove('active');
+        }
+
+        function showMenu() {
+            document.getElementById('menu-view').style.display = 'grid';
+            document.getElementById('checkout-view').classList.remove('active');
+            document.getElementById('confirmation-view').classList.remove('active');
+        }
+
+        function handlePayment(event) {
+            event.preventDefault();
+
+            // Build order summary
+            const items = Object.entries(cart);
+            let subtotal = items.reduce((sum, [_, item]) => sum + item.price * item.qty, 0);
+            const tax = subtotal * 0.08;
+            const total = subtotal + tax;
+
+            const orderDetails = document.getElementById('order-details');
+            orderDetails.innerHTML = items.map(([name, item]) => `
+                <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
+                    <span>${name} x${item.qty}</span>
+                    <span>$${(item.price * item.qty).toFixed(2)}</span>
+                </div>
+            `).join('');
+
+            document.getElementById('order-total').textContent = `$${total.toFixed(2)}`;
+
+            // Show confirmation
+            document.getElementById('checkout-view').classList.remove('active');
+            document.getElementById('confirmation-view').classList.add('active');
+        }
+
+        function resetOrder() {
+            cart = {};
+            saveCart();
+            document.getElementById('checkout-form').reset();
+            showMenu();
+        }
+
+        // Initialize
+        updateCartUI();
+
+        // Expose for testing
+        window.addToCart = addToCart;
+        window.showCheckout = showCheckout;
+        window.showMenu = showMenu;
+        window.resetOrder = resetOrder;
+    </script>
+</body>
+</html>
