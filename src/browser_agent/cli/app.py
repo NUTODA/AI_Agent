@@ -10,7 +10,10 @@ from browser_agent.browser.engine import PlaywrightBrowserEngine
 from browser_agent.config import RuntimeSettings
 from browser_agent.llm.parser import PlannerResponseParser
 from browser_agent.llm.planner import LLMPlanner
-from browser_agent.llm.provider import OpenAICompatibleProvider
+from browser_agent.llm.provider import (
+    GoogleGenerativeLanguageProvider,
+    OpenAICompatibleProvider,
+)
 from browser_agent.runtime.loop import RuntimeLoop
 from browser_agent.runtime.models import FinalReport, RuntimeStatus, UserTask
 from browser_agent.runtime.session import RuntimeSession
@@ -114,25 +117,35 @@ def build_planner(
     if not settings.planner_enabled:
         return None, (
             "Planner is not configured. Set `BROWSER_AGENT_PLANNER_ENABLED=true` and "
-            "provide an OpenAI-compatible endpoint plus model name."
+            "provide an endpoint plus model name."
         )
-    if settings.planner_provider != "openai_compatible":
+    if settings.planner_provider not in ("openai_compatible", "google_compatible"):
         return None, (
             f"Unsupported planner provider `{settings.planner_provider}`. "
-            "Only `openai_compatible` is currently implemented."
+            "Supported: `openai_compatible`, `google_compatible`."
         )
     if not settings.planner_base_url:
         return None, "Planner is enabled but `BROWSER_AGENT_PLANNER_BASE_URL` is missing."
     if not settings.planner_model:
         return None, "Planner is enabled but `BROWSER_AGENT_PLANNER_MODEL` is missing."
 
-    provider = OpenAICompatibleProvider(
-        base_url=settings.planner_base_url,
-        model_name=settings.planner_model,
-        api_key=settings.planner_api_key,
-        timeout_seconds=settings.planner_timeout_seconds,
-        temperature=settings.planner_temperature,
-    )
+    if settings.planner_provider == "openai_compatible":
+        provider = OpenAICompatibleProvider(
+            base_url=settings.planner_base_url,
+            model_name=settings.planner_model,
+            api_key=settings.planner_api_key,
+            timeout_seconds=settings.planner_timeout_seconds,
+            temperature=settings.planner_temperature,
+        )
+    else:  # google_compatible
+        provider = GoogleGenerativeLanguageProvider(
+            base_url=settings.planner_base_url,
+            model_name=settings.planner_model,
+            api_key=settings.planner_api_key,
+            timeout_seconds=settings.planner_timeout_seconds,
+            temperature=settings.planner_temperature,
+        )
+
     parser = PlannerResponseParser(skill_registry=skill_registry)
     return LLMPlanner(provider=provider, parser=parser), None
 
@@ -167,8 +180,10 @@ def run_cli(argv: Sequence[str] | None = None) -> FinalReport:
             completed=False,
             next_steps=[
                 "Set `BROWSER_AGENT_PLANNER_ENABLED=true`.",
-                "Set `BROWSER_AGENT_PLANNER_BASE_URL` to an OpenAI-compatible endpoint.",
+                "Set `BROWSER_AGENT_PLANNER_PROVIDER` to `openai_compatible` or `google_compatible`.",
+                "Set `BROWSER_AGENT_PLANNER_BASE_URL` to the provider endpoint.",
                 "Set `BROWSER_AGENT_PLANNER_MODEL` to the planner model name.",
+                "Set `BROWSER_AGENT_PLANNER_API_KEY` to your API key.",
             ],
             step_count=0,
         )

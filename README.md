@@ -81,16 +81,42 @@ If the `playwright` shell command is unavailable in your environment, run the br
 python -m playwright install chromium
 ```
 
-The multi-step planner is not enabled by default. Configure it through environment variables:
+The multi-step planner is not enabled by default. Configure it through environment variables or a `.env` file:
+
+1. Copy `.env.example` to `.env` or `.env.browser-agent`:
+   ```bash
+   cp .env.example .env.browser-agent
+   ```
+
+2. Edit the file and set your API key and provider.
+
+3. Run:
+   ```bash
+   browser-agent --start-url https://example.com "Inspect the current page"
+   ```
+
+### Provider: OpenAI-compatible
 
 ```bash
-export BROWSER_AGENT_PLANNER_ENABLED=true
-export BROWSER_AGENT_PLANNER_PROVIDER=openai_compatible
-export BROWSER_AGENT_PLANNER_BASE_URL=https://your-llm-endpoint/v1
-export BROWSER_AGENT_PLANNER_MODEL=your-model-name
-export BROWSER_AGENT_PLANNER_API_KEY=your-api-key
-browser-agent --start-url https://example.com "Inspect the current page"
+BROWSER_AGENT_PLANNER_ENABLED=true
+BROWSER_AGENT_PLANNER_PROVIDER=openai_compatible
+BROWSER_AGENT_PLANNER_BASE_URL=https://api.openai.com/v1
+BROWSER_AGENT_PLANNER_MODEL=gpt-4o-mini
+BROWSER_AGENT_PLANNER_API_KEY=sk-...
 ```
+
+### Provider: Google Gemini
+
+```bash
+BROWSER_AGENT_PLANNER_ENABLED=true
+BROWSER_AGENT_PLANNER_PROVIDER=google_compatible
+BROWSER_AGENT_PLANNER_BASE_URL=https://generativelanguage.googleapis.com/v1beta
+BROWSER_AGENT_PLANNER_MODEL=gemini-flash-latest
+BROWSER_AGENT_PLANNER_API_KEY=AIza...
+```
+
+- For Google AI Studio, get your API key at https://aistudio.google.com/app/apikey
+- The `BASE_URL` can be just the host (e.g. `https://generativelanguage.googleapis.com/v1beta`) — the model ID and `:generateContent` are appended automatically.
 
 If the planner is not configured, the CLI now says so explicitly instead of falling back to fake autonomy.
 

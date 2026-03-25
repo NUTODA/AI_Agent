@@ -33,6 +33,7 @@ def test_cli_reports_missing_planner_configuration_in_json_output(
 ) -> None:
     monkeypatch.setenv("BROWSER_AGENT_TRACE_DIR", str(tmp_path / "traces"))
     monkeypatch.setenv("BROWSER_AGENT_ARTIFACT_DIR", str(tmp_path / "artifacts"))
+    monkeypatch.setenv("BROWSER_AGENT_PLANNER_ENABLED", "false")
 
     report = run_cli(["--json", "Review my inbox for spam"])
     captured = capsys.readouterr()

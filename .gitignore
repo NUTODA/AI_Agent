@@ -15,3 +15,5 @@ traces/
 artifacts/
 
 .env
+.env.browser-agent
+.env.local
