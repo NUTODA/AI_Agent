@@ -56,6 +56,15 @@ from browser_agent.ui.formatting import format_tool_target, summarize_skill_inpu
 class RuntimeLoop:
     """Coordinate planning, safety checks, skill execution, and reporting."""
 
+    _EXPLORATION_SKILLS = frozenset(
+        {
+            "observe_page",
+            "extract_page_text",
+            "get_interactive_elements",
+            "scroll_viewport",
+        }
+    )
+
     def __init__(
         self,
         *,
@@ -377,6 +386,19 @@ class RuntimeLoop:
 
                 action = decision.to_agent_action()
                 if self._is_repeated_action_without_progress(action, session):
+                    return self._handle_repeated_action_stop(
+                        session=session,
+                        step_index=step_index,
+                        observation=observation_before,
+                        thought=thought,
+                        decision=decision,
+                        action=action,
+                    )
+                if self._is_repetitive_exploration_loop(
+                    action=action,
+                    session=session,
+                    current_observation=observation_before,
+                ):
                     return self._handle_repeated_action_stop(
                         session=session,
                         step_index=step_index,
@@ -1146,6 +1168,32 @@ class RuntimeLoop:
             and previous.parameters == action.parameters
             for previous in recent
         )
+
+    def _is_repetitive_exploration_loop(
+        self,
+        *,
+        action: AgentAction,
+        session: RuntimeSession,
+        current_observation: AgentObservation,
+    ) -> bool:
+        if action.tool_name not in self._EXPLORATION_SKILLS:
+            return False
+
+        recent_actions = [item.tool_name for item in session.actions[-5:]] + [action.tool_name]
+        if len(recent_actions) < 6:
+            return False
+        if any(name not in self._EXPLORATION_SKILLS for name in recent_actions):
+            return False
+        if "scroll_viewport" not in recent_actions or "extract_page_text" not in recent_actions:
+            return False
+
+        recent_urls = [item.current_url for item in session.trace_items[-5:] if item.current_url]
+        if len(recent_urls) < 5:
+            return False
+        if len(set(recent_urls + [current_observation.page_url])) != 1:
+            return False
+
+        return True
 
     def _validate_element_targeting(
         self,

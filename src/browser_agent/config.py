@@ -18,8 +18,9 @@ class RuntimeSettings(BaseModel):
     """Runtime settings loaded from environment variables or CLI defaults."""
 
     headless: bool = True
-    max_steps: int = 8
-    max_no_progress_steps: int = 3
+    # Default allows multi-page research (tens of steps); override via env / --max-steps.
+    max_steps: int = 80
+    max_no_progress_steps: int = 10
     default_timeout_ms: int = 5_000
     max_text_chars: int = 4_000
     trace_dir: Path = Field(default_factory=lambda: Path("traces"))
@@ -43,9 +44,9 @@ class RuntimeSettings(BaseModel):
 
         return cls(
             headless=os.getenv("BROWSER_AGENT_HEADLESS", "true").lower() == "true",
-            max_steps=int(os.getenv("BROWSER_AGENT_MAX_STEPS", "8")),
+            max_steps=int(os.getenv("BROWSER_AGENT_MAX_STEPS", "80")),
             max_no_progress_steps=int(
-                os.getenv("BROWSER_AGENT_MAX_NO_PROGRESS_STEPS", "3")
+                os.getenv("BROWSER_AGENT_MAX_NO_PROGRESS_STEPS", "10")
             ),
             default_timeout_ms=int(os.getenv("BROWSER_AGENT_TIMEOUT_MS", "5000")),
             max_text_chars=int(os.getenv("BROWSER_AGENT_MAX_TEXT_CHARS", "4000")),

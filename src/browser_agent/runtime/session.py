@@ -264,6 +264,26 @@ class RuntimeSession:
     def planner_state(self) -> PlannerSessionState:
         """Return the typed planner-facing snapshot of session state."""
 
+        latest_extracted_text: str | None = None
+        latest_extracted_text_truncated: bool | None = None
+        latest_extracted_text_url: str | None = None
+        for result in reversed(self.tool_results):
+            if (
+                result.skill_name == "extract_page_text"
+                and result.status.value == "success"
+                and isinstance(result.data.get("text"), str)
+            ):
+                latest_extracted_text = result.data["text"]
+                truncated = result.data.get("truncated")
+                latest_extracted_text_truncated = (
+                    bool(truncated) if isinstance(truncated, bool) else None
+                )
+                page_url = result.data.get("page_url")
+                latest_extracted_text_url = (
+                    page_url if isinstance(page_url, str) and page_url else None
+                )
+                break
+
         return PlannerSessionState(
             session_id=self.session_id,
             status=self.status,
@@ -282,6 +302,12 @@ class RuntimeSession:
             latest_tool_status=(
                 self.latest_tool_result.status if self.latest_tool_result else None
             ),
+            latest_tool_message=(
+                self.latest_tool_result.message if self.latest_tool_result else None
+            ),
+            latest_extracted_text=latest_extracted_text,
+            latest_extracted_text_truncated=latest_extracted_text_truncated,
+            latest_extracted_text_url=latest_extracted_text_url,
             pending_confirmation=self.pending_confirmation,
             pending_user_question=self.pending_user_question,
             user_responses=self.user_responses[-3:],

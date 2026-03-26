@@ -195,7 +195,8 @@ Autonomous browser agents are vulnerable to unproductive loops, so the runtime m
 
 Current protections:
 
-- `max_steps`: hard cap on execution steps;
+- `max_steps`: hard cap on execution steps (default **80**, overridable via `BROWSER_AGENT_MAX_STEPS` / `--max-steps`);
+- `max_no_progress_steps`: stop after this many consecutive steps with no observable progress (default **10**);
 - deterministic progress detection from URL/title/text/interactive-element changes;
 - repeated-action detection when the same action is selected without progress;
 - planner-failure degradation into a controlled failure state;

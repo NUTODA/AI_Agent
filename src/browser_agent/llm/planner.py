@@ -44,6 +44,10 @@ class PlannerSessionState(BaseModel):
     latest_page_title: str | None = None
     latest_action_name: str | None = None
     latest_tool_status: ToolExecutionStatus | None = None
+    latest_tool_message: str | None = None
+    latest_extracted_text: str | None = None
+    latest_extracted_text_truncated: bool | None = None
+    latest_extracted_text_url: str | None = None
     pending_confirmation: ConfirmationRequest | None = None
     pending_user_question: PendingUserQuestion | None = None
     user_responses: list[UserResponse] = Field(default_factory=list)

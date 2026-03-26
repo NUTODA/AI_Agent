@@ -111,6 +111,35 @@ def test_parser_normalizes_common_decision_synonyms() -> None:
     assert decision.progress_assessment == PlannerProgressState.PARTIAL_PROGRESS
 
 
+def test_parser_normalizes_progress_assessment_synonyms_and_invalid() -> None:
+    """LLMs often emit short labels; invalid values must not fail the whole parse."""
+
+    parser = build_parser()
+    base = {
+        "decision_type": "act",
+        "rationale": "Test.",
+        "chosen_skill": "navigate",
+        "skill_input": {"url": "https://example.com", "wait_for": "load"},
+        "expected_outcome": "Loaded.",
+        "risk_level": "low",
+        "destructive": False,
+        "completion_confidence": 0.5,
+        "requires_confirmation": False,
+        "user_question": None,
+        "finish_reason": None,
+        "failure_reason": None,
+    }
+
+    d1 = parser.parse({**base, "progress_assessment": "partial"})
+    assert d1.progress_assessment == PlannerProgressState.PARTIAL_PROGRESS
+
+    d2 = parser.parse({**base, "progress_assessment": "not_a_valid_progress_label"})
+    assert d2.progress_assessment == PlannerProgressState.UNKNOWN
+
+    d3 = parser.parse({**base, "progress_assessment": 42})
+    assert d3.progress_assessment == PlannerProgressState.UNKNOWN
+
+
 def test_parser_accepts_valid_structured_action_json() -> None:
     parser = build_parser()
 
@@ -162,6 +191,36 @@ def test_parser_rejects_unregistered_skill_names() -> None:
 
     assert decision.decision_type == PlannerDecisionType.FAIL
     assert "unregistered skill" in (decision.failure_reason or "")
+
+
+def test_parser_coerces_finish_task_act_payload_into_finish_decision() -> None:
+    parser = build_parser()
+
+    decision = parser.parse(
+        {
+            "decision_type": "act",
+            "rationale": "The page already contains the weekly forecast, so it is time to finish.",
+            "chosen_skill": "finish_task",
+            "skill_input": {
+                "status": "success",
+                "summary": "Прогноз на неделю для Санкт-Петербурга уже извлечён.",
+            },
+            "expected_outcome": "Return the final answer.",
+            "risk_level": "low",
+            "destructive": False,
+            "completion_confidence": 0.95,
+            "progress_assessment": "substantial_progress",
+            "requires_confirmation": False,
+            "user_question": None,
+            "finish_reason": None,
+            "failure_reason": None,
+        }
+    )
+
+    assert decision.decision_type == PlannerDecisionType.FINISH
+    assert decision.chosen_skill is None
+    assert decision.skill_input == {}
+    assert decision.finish_reason == "Прогноз на неделю для Санкт-Петербурга уже извлечён."
 
 
 def test_parser_rejects_invalid_skill_arguments() -> None:

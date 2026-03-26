@@ -5,6 +5,7 @@ from __future__ import annotations
 from browser_agent.browser.engine import BrowserOperationResult, StubBrowserEngine
 from browser_agent.browser.page_state import PageState
 from browser_agent.config import RuntimeSettings
+from browser_agent.llm.prompts import build_planner_context
 from browser_agent.llm.planner import PlannerDecision
 from browser_agent.runtime.loop import RuntimeLoop
 from browser_agent.runtime.models import (
@@ -123,6 +124,36 @@ class NoProgressBrowser(StubBrowserEngine):
             message=f"Clicked {target}.",
             page_state=page_state,
             metadata={"resolved_target": target},
+        )
+
+
+class ScrollingTextBrowser(StubBrowserEngine):
+    """Stub browser that keeps one URL while scroll changes the observed text."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            initial_state=PageState(
+                url="https://example.com/weather",
+                title="Weather",
+                summary="Weather page with a long report.",
+                text_excerpt="Top of weather page.",
+            )
+        )
+        self._scroll_index = 0
+
+    def scroll_viewport(self, direction: str, amount: int, target: str | None = None):
+        del target
+        self._scroll_index += 1
+        self._state = self._state.model_copy(
+            update={
+                "text_excerpt": f"Weather block chunk {self._scroll_index}",
+                "summary": f"Weather page chunk {self._scroll_index}.",
+            }
+        )
+        return BrowserOperationResult(
+            message=f"Scrolled {direction} by {amount}px.",
+            page_state=self._state,
+            metadata={"scroll_y": self._scroll_index * amount},
         )
 
 
@@ -399,3 +430,106 @@ def test_runtime_loop_honors_explicit_fail_decision(tmp_path) -> None:
     assert report.failure_reason == "The required data is unavailable on the page."
     assert not session.actions
     assert session.trace_items[0].planner_decision_type == PlannerDecisionType.FAIL
+
+
+def test_runtime_loop_stops_repetitive_exploration_loop_even_with_text_changes(tmp_path) -> None:
+    settings = RuntimeSettings(
+        trace_dir=tmp_path / "traces",
+        artifact_dir=tmp_path / "artifacts",
+        max_steps=12,
+    )
+    session = RuntimeSession(
+        task=UserTask(request="Find the weekly weather forecast"),
+        settings=settings,
+    )
+    planner = QueuePlanner(
+        [
+            act_decision(
+                skill="scroll_viewport",
+                skill_input={"direction": "down", "amount": 900},
+                rationale="Scroll for the forecast block.",
+                expected_outcome="A lower section of the page becomes available.",
+            ),
+            act_decision(
+                skill="extract_page_text",
+                skill_input={"max_chars": 500},
+                rationale="Read the page again after scrolling.",
+                expected_outcome="The runtime captures more readable text.",
+            ),
+            act_decision(
+                skill="scroll_viewport",
+                skill_input={"direction": "down", "amount": 900},
+                rationale="Scroll again for the forecast block.",
+                expected_outcome="A lower section of the page becomes available.",
+            ),
+            act_decision(
+                skill="extract_page_text",
+                skill_input={"max_chars": 500},
+                rationale="Read the page again after scrolling.",
+                expected_outcome="The runtime captures more readable text.",
+            ),
+            act_decision(
+                skill="scroll_viewport",
+                skill_input={"direction": "down", "amount": 900},
+                rationale="Scroll again for the forecast block.",
+                expected_outcome="A lower section of the page becomes available.",
+            ),
+            act_decision(
+                skill="extract_page_text",
+                skill_input={"max_chars": 500},
+                rationale="Read the page again after scrolling.",
+                expected_outcome="The runtime captures more readable text.",
+            ),
+        ]
+    )
+    loop = build_loop(
+        planner=planner,
+        browser=ScrollingTextBrowser(),
+        trace_dir=settings.trace_dir,
+    )
+
+    report = loop.run(session)
+
+    assert report.status == RuntimeStatus.FAILED
+    assert "repeatedly" in report.summary.lower()
+    assert session.step_count == 6
+
+
+def test_planner_context_includes_latest_extracted_text(tmp_path) -> None:
+    settings = RuntimeSettings(
+        trace_dir=tmp_path / "traces",
+        artifact_dir=tmp_path / "artifacts",
+    )
+    session = RuntimeSession(
+        task=UserTask(request="Read the current page"),
+        settings=settings,
+    )
+    browser = StubBrowserEngine(
+        initial_state=PageState(
+            url="https://example.com/report",
+            title="Report",
+            summary="Report page.",
+            text_excerpt="Short report excerpt.",
+        )
+    )
+    loop = build_loop(
+        planner=QueuePlanner(
+            [
+                act_decision(
+                    skill="extract_page_text",
+                    skill_input={"max_chars": 200},
+                    rationale="Read the page.",
+                    expected_outcome="The runtime captures readable page text.",
+                )
+            ]
+        ),
+        browser=browser,
+        trace_dir=settings.trace_dir,
+    )
+
+    # Run one step manually through the runtime, then inspect planner-facing context.
+    loop.run(session)
+    context_text = build_planner_context(session.build_planner_context(available_skills=[]))
+
+    assert "Latest extracted page text:" in context_text
+    assert "Short report excerpt." in context_text

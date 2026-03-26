@@ -5,7 +5,12 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 from browser_agent.runtime.models import AgentObservation, InteractiveElement
-from browser_agent.skills.base import BaseSkill, SkillContext, SkillExecutionError
+from browser_agent.skills.base import (
+    BaseSkill,
+    SkillContext,
+    SkillExecutionError,
+    raise_for_browser_result,
+)
 
 
 class ObservePageInput(BaseModel):

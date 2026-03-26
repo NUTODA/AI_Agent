@@ -12,7 +12,7 @@ import pytest
 
 from browser_agent.browser.engine import BrowserOperationResult, StubBrowserEngine
 from browser_agent.runtime.models import AgentObservation
-from browser_agent.skills.base import SkillContext, SkillRegistry
+from browser_agent.skills.base import SkillContext
 from browser_agent.skills.dialog import (
     InspectDialogInput,
     InspectDialogOutput,
@@ -41,6 +41,22 @@ from browser_agent.skills.observation import (
     WaitForElementOutput,
     WaitForElementSkill,
 )
+
+
+class FloatScrollStubBrowser(StubBrowserEngine):
+    """Stub that emits browser-like float scroll coords (scrollY can be fractional)."""
+
+    def scroll_viewport(
+        self,
+        direction: str,
+        amount: int,
+        target: str | None = None,
+    ) -> BrowserOperationResult:
+        result = super().scroll_viewport(direction, amount, target)
+        md = dict(result.metadata or {})
+        md["scroll_x"] = 10.7
+        md["scroll_y"] = 419.5
+        return result.model_copy(update={"metadata": md})
 
 
 class TestSelectOptionSkillContract:
@@ -334,8 +350,13 @@ class TestSkillExecution:
     def mock_context(self) -> SkillContext:
         """Create a mock skill context with stub browser."""
         browser = StubBrowserEngine()
-        registry = SkillRegistry()
-        return SkillContext(browser=browser, skill_registry=registry)
+        return SkillContext(
+            session=MagicMock(),
+            browser=browser,
+            trace_recorder=MagicMock(),
+            safety_guardrails=MagicMock(),
+            confirmation_manager=MagicMock(),
+        )
 
     def test_select_option_execution(self, mock_context: SkillContext) -> None:
         """select_option should call browser method."""
@@ -366,6 +387,27 @@ class TestSkillExecution:
         assert result.direction == "down"
         assert result.amount == 300
         assert "scroll" in result.message.lower()
+
+    def test_scroll_viewport_float_scroll_coords_coerced_to_int(self) -> None:
+        """scroll_viewport should tolerate float scroll_x/scroll_y from browser metadata."""
+        browser = FloatScrollStubBrowser()
+        context = SkillContext(
+            session=MagicMock(),
+            browser=browser,
+            trace_recorder=MagicMock(),
+            safety_guardrails=MagicMock(),
+            confirmation_manager=MagicMock(),
+        )
+        skill = ScrollViewportSkill()
+        payload = ScrollViewportInput(direction="down", amount=300)
+
+        result = skill.execute(context, payload)
+
+        assert isinstance(result, ScrollViewportOutput)
+        assert result.scroll_x == 11
+        assert result.scroll_y == 420
+        assert isinstance(result.scroll_x, int)
+        assert isinstance(result.scroll_y, int)
 
     def test_press_key_execution(self, mock_context: SkillContext) -> None:
         """press_key should call browser method."""

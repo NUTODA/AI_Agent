@@ -30,6 +30,21 @@ PLANNER_SYSTEM_PROMPT = dedent(
     - Ask the user only when required information is genuinely missing.
     - Request confirmation before risky or destructive actions.
     - Finish only when the task is sufficiently supported by observed evidence.
+    - progress_assessment must be exactly one of: unknown, no_progress, partial_progress,
+      substantial_progress (snake_case; no other strings).
+    - `extract_page_text` already returns readable text from the current page body, not just
+      the currently visible viewport. After a successful non-truncated extraction, do not
+      scroll just to "see more" unless the needed content is clearly missing or hidden behind
+      an interaction.
+    - For reading information (weather, forecasts, articles): prefer extract_page_text first;
+      use scroll_viewport only when the extracted text was truncated or the needed content is
+      hidden until a control is used.
+    - If the recent steps are repeating read-only exploration on the same page
+      (especially scroll_viewport + extract_page_text), do not continue the same pattern.
+      Either finish with the evidence already collected, use a genuinely different action,
+      ask the user, or fail honestly.
+      After scroll or layout changes, the next step must rely on the latest observation's
+      element_id values (they can change).
 
     CRITICAL - Element targeting policy for click_element, type_text, select_option, press_key:
     1. If the target element appears in the Current observation's interactive_elements list:
@@ -103,9 +118,13 @@ def build_planner_context(planner_context: PlannerContext) -> str:
         - latest_page_title: {session_state.latest_page_title or "unknown"}
         - latest_action_name: {session_state.latest_action_name or "none"}
         - latest_tool_status: {session_state.latest_tool_status.value if session_state.latest_tool_status else "none"}
+        - latest_tool_message: {session_state.latest_tool_message or "none"}
 
         Pending state:
         {_render_pending_state(planner_context)}
+
+        Latest extracted page text:
+        {_render_latest_extracted_text(session_state)}
 
         Current observation:
         {_render_observation(planner_context)}
@@ -145,6 +164,19 @@ def _render_pending_state(planner_context: PlannerContext) -> str:
     else:
         lines.append("- recent_user_answers: none")
 
+    return "\n".join(lines)
+
+
+def _render_latest_extracted_text(session_state) -> str:
+    text = session_state.latest_extracted_text
+    if not text:
+        return "- none"
+
+    lines = [
+        f"- source_url: {session_state.latest_extracted_text_url or 'unknown'}",
+        f"- truncated: {session_state.latest_extracted_text_truncated if session_state.latest_extracted_text_truncated is not None else 'unknown'}",
+        f"- text: {text[:1500]}",
+    ]
     return "\n".join(lines)
 
 

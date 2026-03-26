@@ -86,7 +86,7 @@ python -m playwright install chromium
 browser-agent "Review my inbox for spam"
 ```
 
-You can also pass flags:
+You can also pass flags. The default step cap is **80** (suited to multi-page research); use `--max-steps` for shorter smoke tests:
 
 ```bash
 browser-agent run --headed --start-url https://example.com --max-steps 12 "Inspect the page"

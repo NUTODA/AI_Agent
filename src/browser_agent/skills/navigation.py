@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel
 
@@ -13,6 +13,17 @@ from browser_agent.skills.base import (
     SkillExecutionError,
     raise_for_browser_result,
 )
+
+
+def _coerce_scroll_coord(value: Any, *, default: int = 0) -> int:
+    """Normalize scroll coordinates from browser metadata to int for output schemas."""
+
+    if value is None:
+        return default
+    try:
+        return int(round(float(value)))
+    except (TypeError, ValueError):
+        return default
 
 
 class NavigateInput(BaseModel):
@@ -128,8 +139,8 @@ class ScrollViewportSkill(BaseSkill):
             direction=payload.direction,
             amount=payload.amount,
             target=payload.selector,
-            scroll_x=metadata.get("scroll_x", 0),
-            scroll_y=metadata.get("scroll_y", 0),
+            scroll_x=_coerce_scroll_coord(metadata.get("scroll_x"), default=0),
+            scroll_y=_coerce_scroll_coord(metadata.get("scroll_y"), default=0),
             message=result.message,
             page_title=result.page_state.title if result.page_state else None,
             observation=observation,

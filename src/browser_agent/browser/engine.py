@@ -28,6 +28,17 @@ if TYPE_CHECKING:
 ALLOWED_WAIT_UNTIL = {"load", "domcontentloaded", "networkidle", "commit"}
 ALLOWED_URL_SCHEMES = {"http", "https", "file", "data", "about"}
 
+
+def _scroll_coord_to_int(value: Any) -> int:
+    """Normalize browser scroll coordinates (often float) to int for pydantic schemas."""
+
+    if value is None:
+        return 0
+    try:
+        return int(round(float(value)))
+    except (TypeError, ValueError):
+        return 0
+
 PAGE_SNAPSHOT_SCRIPT = """
 ([maxTextChars, maxElements]) => {
   const normalizeText = (value) => {
@@ -789,6 +800,12 @@ class PlaywrightBrowserEngine:
             return self.new_page()
         return self._page
 
+    def _click_locator_resilient(self, locator: Any) -> None:
+        """Scroll the element into view, then click (reduces off-viewport / overlay flakes)."""
+
+        locator.scroll_into_view_if_needed(timeout=self.default_timeout_ms)
+        locator.click(timeout=self.default_timeout_ms)
+
     def observe_page(self) -> PageState:
         """Capture a compact page snapshot."""
 
@@ -917,7 +934,7 @@ class PlaywrightBrowserEngine:
         for candidate in resolution.candidates:
             try:
                 locator = page.locator(candidate.value).first
-                locator.click(timeout=self.default_timeout_ms)
+                self._click_locator_resilient(locator)
                 page_state = self._observe_page(reason="click")
                 return BrowserOperationResult(
                     message=f"Clicked target `{target}`.",
@@ -990,7 +1007,7 @@ class PlaywrightBrowserEngine:
         for candidate in resolution.candidates:
             try:
                 locator = page.locator(candidate.value).first
-                locator.click(timeout=self.default_timeout_ms)
+                self._click_locator_resilient(locator)
                 if clear_first:
                     locator.fill(text, timeout=self.default_timeout_ms)
                 else:
@@ -1176,8 +1193,8 @@ class PlaywrightBrowserEngine:
                 page.evaluate(f"() => window.scrollBy({dx}, {dy})")
 
             page_state = self._observe_page(reason="scroll_viewport")
-            scroll_x = page.evaluate("() => window.scrollX")
-            scroll_y = page.evaluate("() => window.scrollY")
+            scroll_x = _scroll_coord_to_int(page.evaluate("() => window.scrollX"))
+            scroll_y = _scroll_coord_to_int(page.evaluate("() => window.scrollY"))
 
             return BrowserOperationResult(
                 message=f"Scrolled {direction} by {amount}px.",

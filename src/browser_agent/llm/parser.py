@@ -13,6 +13,34 @@ from browser_agent.skills.registry import SkillRegistry
 
 _VALID_DECISION_TYPES = frozenset(m.value for m in PlannerDecisionType)
 
+_VALID_PROGRESS_STATES = frozenset(m.value for m in PlannerProgressState)
+
+# Models often emit short labels or camelCase instead of the schema snake_case values.
+_PROGRESS_ASSESSMENT_SYNONYMS: dict[str, str] = {
+    "partial": "partial_progress",
+    "partialprogress": "partial_progress",
+    "partially": "partial_progress",
+    "in_progress": "partial_progress",
+    "inprogress": "partial_progress",
+    "some": "partial_progress",
+    "substantial": "substantial_progress",
+    "substantialprogress": "substantial_progress",
+    "major": "substantial_progress",
+    "significant": "substantial_progress",
+    "complete": "substantial_progress",
+    "completed": "substantial_progress",
+    "done": "substantial_progress",
+    "none": "no_progress",
+    "none_progress": "no_progress",
+    "stalled": "no_progress",
+    "blocked": "no_progress",
+    "unclear": "unknown",
+    "uncertain": "unknown",
+    "n/a": "unknown",
+    "na": "unknown",
+    "unk": "unknown",
+}
+
 # Small models often emit synonyms or pasted prompt fragments; map before Pydantic.
 _DECISION_TYPE_SYNONYMS: dict[str, str] = {
     "action": "act",
@@ -69,12 +97,82 @@ def _normalize_enum_field(
     return raw
 
 
+def _normalize_progress_assessment(raw: Any) -> str:
+    """Map model output to a valid PlannerProgressState value; never leave invalid strings."""
+
+    if raw is None:
+        return PlannerProgressState.UNKNOWN.value
+    if isinstance(raw, bool):
+        return (
+            PlannerProgressState.PARTIAL_PROGRESS.value
+            if raw
+            else PlannerProgressState.NO_PROGRESS.value
+        )
+    if isinstance(raw, (int, float)):
+        return PlannerProgressState.UNKNOWN.value
+    if not isinstance(raw, str):
+        return PlannerProgressState.UNKNOWN.value
+
+    s = raw.strip().lower().replace(" ", "_").replace("-", "_")
+    if s in _VALID_PROGRESS_STATES:
+        return s
+    if s in _PROGRESS_ASSESSMENT_SYNONYMS:
+        return _PROGRESS_ASSESSMENT_SYNONYMS[s]
+    # Try generic normalization (handles "PARTIAL PROGRESS" etc.)
+    t = _normalize_enum_field(
+        raw,
+        valid=_VALID_PROGRESS_STATES,
+        synonyms=_PROGRESS_ASSESSMENT_SYNONYMS,
+    )
+    if isinstance(t, str) and t in _VALID_PROGRESS_STATES:
+        return t
+    return PlannerProgressState.UNKNOWN.value
+
+
 _ACTING_DECISION_TYPES = frozenset(
     {
         PlannerDecisionType.ACT.value,
         PlannerDecisionType.REQUEST_CONFIRMATION.value,
     }
 )
+
+
+def _coerce_finish_task_alias(payload: dict[str, Any]) -> None:
+    """Rewrite legacy `act + finish_task` payloads into canonical `finish` decisions."""
+
+    if payload.get("decision_type") not in _ACTING_DECISION_TYPES:
+        return
+
+    chosen_skill = payload.get("chosen_skill")
+    if not isinstance(chosen_skill, str) or chosen_skill.strip() != "finish_task":
+        return
+
+    skill_input = payload.get("skill_input")
+    finish_reason: str | None = None
+    if isinstance(skill_input, dict):
+        raw_summary = skill_input.get("summary")
+        if isinstance(raw_summary, str) and raw_summary.strip():
+            finish_reason = raw_summary.strip()
+
+    if finish_reason is None:
+        raw_finish_reason = payload.get("finish_reason")
+        if isinstance(raw_finish_reason, str) and raw_finish_reason.strip():
+            finish_reason = raw_finish_reason.strip()
+
+    if finish_reason is None:
+        raw_rationale = payload.get("rationale")
+        if isinstance(raw_rationale, str) and raw_rationale.strip():
+            finish_reason = raw_rationale.strip()
+
+    payload["decision_type"] = PlannerDecisionType.FINISH.value
+    payload["chosen_skill"] = None
+    payload["skill_input"] = {}
+    payload["expected_outcome"] = None
+    payload["requires_confirmation"] = False
+    payload["destructive"] = False
+    payload["user_question"] = None
+    payload["failure_reason"] = None
+    payload["finish_reason"] = finish_reason or "The task has enough evidence to finish."
 
 
 def _coerce_expected_outcome_for_acting(payload: dict[str, Any]) -> None:
@@ -110,10 +208,10 @@ def _coerce_planner_payload_dict(payload: dict[str, Any]) -> dict[str, Any]:
             valid=frozenset(m.value for m in RiskLevel),
         )
     if "progress_assessment" in out:
-        out["progress_assessment"] = _normalize_enum_field(
-            out["progress_assessment"],
-            valid=frozenset(m.value for m in PlannerProgressState),
+        out["progress_assessment"] = _normalize_progress_assessment(
+            out["progress_assessment"]
         )
+    _coerce_finish_task_alias(out)
     _coerce_expected_outcome_for_acting(out)
     return out
 
