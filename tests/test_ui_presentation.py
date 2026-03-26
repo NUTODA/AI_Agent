@@ -9,6 +9,8 @@ from browser_agent.ui.formatting import (
     generate_human_summary,
     humanize_skill_name,
 )
+from browser_agent.ui.models import AgentConsoleState
+from browser_agent.ui.render import build_layout
 
 
 def test_compute_timeline_phase_label_waiting_confirmation() -> None:
@@ -60,6 +62,56 @@ def test_generate_human_summary_observation() -> None:
 def test_humanize_skill_name() -> None:
     assert humanize_skill_name("click_element") == "Click Element"
     assert humanize_skill_name(None) == "—"
+
+
+def test_build_layout_does_not_break_on_rich_markup_like_strings() -> None:
+    """User/LLM text may contain [brackets]; layout must not raise MarkupError."""
+    state = AgentConsoleState()
+    state.task = "Order [combo] and note [/] special"
+    state.human_summary = "Saw [/] in page title"
+    state.observation_summary = "Button [submit] and stray [/] token"
+    state.last_rationale = "Use [bold] not raw"
+    state.page_title = "Test [/] page"
+    state.current_url = "http://127.0.0.1/foo[bar]"
+    layout = build_layout(state)
+    assert layout is not None
+
+
+def _layout_export_text(state: AgentConsoleState) -> str:
+    from rich.console import Console
+
+    c = Console(record=True, width=120, legacy_windows=False, force_terminal=True)
+    c.print(build_layout(state))
+    return c.export_text()
+
+
+def test_build_layout_idle_bottom_panel_operator_read_only() -> None:
+    state = AgentConsoleState()
+    state.bottom_mode = "idle"
+    text = _layout_export_text(state)
+    assert "Operator" in text
+    assert "not a text field" in text.lower() or "status only" in text.lower()
+
+
+def test_build_layout_confirm_bottom_panel_title() -> None:
+    state = AgentConsoleState()
+    state.bottom_mode = "confirm"
+    state.confirm_action = "delete_row"
+    state.confirm_reason = "irreversible"
+    state.confirm_consequences = ["Data loss"]
+    text = _layout_export_text(state)
+    assert "Confirmation" in text
+    assert "CONFIRMATION REQUIRED" in text
+
+
+def test_build_layout_input_bottom_panel_question_title() -> None:
+    state = AgentConsoleState()
+    state.bottom_mode = "input"
+    state.input_question = "Which size?"
+    text = _layout_export_text(state)
+    assert "Question" in text
+    assert "Which size?" in text
+    assert "read-only" in text.lower() or "not a text field" in text.lower()
 
 
 def test_build_final_summary_lines_structure() -> None:

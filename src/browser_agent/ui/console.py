@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable, TypeVar
 
 from rich.console import Console
 from rich.live import Live
+from rich.markup import escape
 from rich.prompt import Confirm, Prompt
+from rich.rule import Rule
 
 from browser_agent.config import RuntimeSettings
-from browser_agent.runtime.models import FinalReport, RuntimeStatus
+from browser_agent.runtime.models import ConfirmationRequest, FinalReport, RuntimeStatus
 from browser_agent.runtime.session import RuntimeSession
 from browser_agent.safety.confirmations import ConfirmationDecision
 from browser_agent.ui.events import (
@@ -46,6 +49,55 @@ from browser_agent.ui.render import build_final_summary_panel, build_layout
 if TYPE_CHECKING:
     from browser_agent.runtime.loop import RuntimeLoop
 
+T = TypeVar("T")
+
+
+def blocking_prompt_with_live(
+    live: Live,
+    app: "AgentConsoleApp",
+    fn: Callable[[], T],
+) -> T:
+    """Exit Rich Live (and alternate screen), run blocking stdin prompts, then resume Live.
+
+    Rich's ``Live.pause()`` is not available in supported Rich versions; ``stop``/``start`` is.
+    """
+    live.stop()
+    app._live = None
+    try:
+        return fn()
+    finally:
+        live.start(refresh=True)
+        app._live = live
+        app._refresh()
+
+
+def _live_prefers_alt_screen(console: Console) -> bool:
+    """Alternate screen is opt-in.
+
+    Default is off: Live updates in the main scroll buffer. That avoids layout “jumping” and
+    keystroke echo flickering under the dashboard (alternate screen + frequent refresh redraws
+    over echoed characters).
+
+    Set ``BROWSER_AGENT_ALT_SCREEN=1`` for a full-screen buffer that clears when the run ends.
+    ``BROWSER_AGENT_NO_ALT_SCREEN=1`` still forces alternate screen off.
+    """
+    no = os.environ.get("BROWSER_AGENT_NO_ALT_SCREEN", "").strip().lower()
+    if no in ("1", "true", "yes", "on"):
+        return False
+    yes = os.environ.get("BROWSER_AGENT_ALT_SCREEN", "").strip().lower()
+    if yes in ("1", "true", "yes", "on"):
+        return bool(console.is_terminal and not console.is_dumb_terminal)
+    return False
+
+
+def _reset_terminal_after_live(console: Console) -> None:
+    """Best-effort restore after Live / interrupt (cursor + alternate screen)."""
+    try:
+        console.show_cursor(True)
+        console.set_alt_screen(False)
+    except Exception:
+        pass
+
 
 def _is_terminal_status(status: RuntimeStatus) -> bool:
     return status in {
@@ -65,6 +117,29 @@ def _clear_error(state: AgentConsoleState) -> None:
     state.error_title = None
     state.error_explanation = None
     state.error_hint = None
+
+
+def _print_pending_confirmation(console: Console, req: ConfirmationRequest) -> None:
+    """Show confirmation details on the main terminal after Live stops."""
+    console.print()
+    console.print(Rule("[bold red]Confirmation required[/]", style="red"))
+    console.print(f"[bold]Action:[/] {escape(req.action_name)}")
+    if req.reason:
+        console.print(f"[bold]Reason:[/] {escape(req.reason)}")
+    console.print(f"[bold]Risk:[/] {escape(str(req.risk_level.value))}")
+    if req.consequences:
+        console.print("[bold]Consequences:[/]")
+        for c in req.consequences:
+            console.print(f"  • {escape(c)}")
+    console.print(f"\n{escape(req.prompt)}\n")
+
+
+def _print_pending_user_question(console: Console, question: str) -> None:
+    """Show the blocking question on the main terminal after Live stops."""
+    console.print()
+    console.print(Rule("[bold cyan]Planner needs input[/]", style="cyan"))
+    console.print(escape(question))
+    console.print()
 
 
 class AgentConsoleApp:
@@ -432,60 +507,94 @@ class AgentConsoleApp:
     def run_interactive_loop(self, loop: RuntimeLoop) -> FinalReport:
         """Run runtime with Live UI and Rich prompts for pause states."""
         self.console.print("[bold cyan]Starting Agent Console…[/]")
-        self.console.print("[dim]Live layout updates below. Traces and artifacts paths appear in the final summary.[/]\n")
+        use_alt = _live_prefers_alt_screen(self.console)
+        self.console.print(
+            "[yellow]Tip:[/] The [bold]Operator[/] panel is not a text field — do not type while the agent runs. "
+            "Wait for a confirmation or answer prompt (the live view pauses first). "
+            "Accidental keys may flicker at the bottom; they are not sent to the agent.\n"
+        )
+        if use_alt:
+            self.console.print(
+                "[dim]Live UI uses the terminal alternate screen; it clears when the run ends. "
+                "When confirmation or your answer is needed, the live view pauses and prompts appear "
+                "on the main terminal. Traces and artifact paths appear in the final summary.[/]\n"
+            )
+        else:
+            self.console.print(
+                "[dim]Live layout updates in the scroll buffer (default). "
+                "Traces and artifact paths appear in the final summary. "
+                "Set [bold]BROWSER_AGENT_ALT_SCREEN=1[/] for a full-screen alternate buffer.[/]\n"
+            )
         layout = build_layout(self.state)
-        with Live(
-            layout,
-            console=self.console,
-            refresh_per_second=8,
-            transient=False,
-        ) as live:
-            self._live = live
-            report = loop.run(self.session)
-            self._refresh()
-
-            while not _is_terminal_status(report.status):
-                if report.status == RuntimeStatus.WAITING_FOR_CONFIRMATION:
-                    if report.pending_confirmation is None:
-                        break
-                    req = report.pending_confirmation
-                    self.state.bottom_mode = "confirm"
-                    self._refresh()
-                    with live.pause(refresh=True):
-                        self.console.print()
-                        approved = Confirm.ask(
-                            f"Approve [bold]{req.action_name}[/]?",
-                            default=False,
-                        )
-                        notes: str | None = None
-                        if not approved:
-                            notes = Prompt.ask(
-                                "Reason for rejection (optional)",
-                                default="",
-                                show_default=False,
-                            )
-                            notes = notes.strip() or None
-                        decision = ConfirmationDecision(
-                            request_id=req.request_id,
-                            approved=approved,
-                            reviewer_notes=notes,
-                        )
-                    report = loop.continue_after_confirmation(self.session, decision)
-                elif report.status == RuntimeStatus.WAITING_FOR_USER:
-                    if report.pending_user_question is None:
-                        break
-                    q = report.pending_user_question.question
-                    self.state.bottom_mode = "input"
-                    self._refresh()
-                    with live.pause(refresh=True):
-                        self.console.print()
-                        answer = Prompt.ask(f"[cyan]{q}[/]", default="")
-                    report = loop.continue_after_user_answer(self.session, answer)
-                else:
-                    break
+        report: FinalReport
+        try:
+            with Live(
+                layout,
+                console=self.console,
+                refresh_per_second=4,
+                screen=use_alt,
+                transient=not use_alt,
+                vertical_overflow="visible",
+            ) as live:
+                self._live = live
+                report = loop.run(self.session)
                 self._refresh()
 
+                while not _is_terminal_status(report.status):
+                    if report.status == RuntimeStatus.WAITING_FOR_CONFIRMATION:
+                        if report.pending_confirmation is None:
+                            break
+                        req = report.pending_confirmation
+                        self.state.bottom_mode = "confirm"
+                        self._refresh()
+
+                        def _confirm() -> ConfirmationDecision:
+                            _print_pending_confirmation(self.console, req)
+                            approved = Confirm.ask(
+                                f"Approve [bold]{escape(req.action_name)}[/]?",
+                                default=False,
+                            )
+                            notes: str | None = None
+                            if not approved:
+                                notes = Prompt.ask(
+                                    "Reason for rejection (optional)",
+                                    default="",
+                                    show_default=False,
+                                )
+                                notes = notes.strip() or None
+                            return ConfirmationDecision(
+                                request_id=req.request_id,
+                                approved=approved,
+                                reviewer_notes=notes,
+                            )
+
+                        decision = blocking_prompt_with_live(live, self, _confirm)
+                        report = loop.continue_after_confirmation(self.session, decision)
+                    elif report.status == RuntimeStatus.WAITING_FOR_USER:
+                        if report.pending_user_question is None:
+                            break
+                        q = report.pending_user_question.question
+                        self.state.input_question = q
+                        self.state.bottom_mode = "input"
+                        self._refresh()
+
+                        def _answer() -> str:
+                            _print_pending_user_question(self.console, q)
+                            return Prompt.ask("[bold]Your answer[/]", default="")
+
+                        answer = blocking_prompt_with_live(live, self, _answer)
+                        report = loop.continue_after_user_answer(self.session, answer)
+                    else:
+                        break
+                    self._refresh()
+
+                self._live = None
+        except KeyboardInterrupt:
+            self.console.print("\n[yellow]Agent Console interrupted by user (Ctrl+C).[/]")
+            raise
+        finally:
             self._live = None
+            _reset_terminal_after_live(self.console)
 
         if self.state.show_final_summary and self.state.final_summary_lines:
             self.console.print()

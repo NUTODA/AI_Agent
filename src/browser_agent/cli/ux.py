@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import sys
-
 from rich.console import Console
+from rich.text import Text
 
 _console = Console(stderr=False)
 
@@ -14,8 +13,13 @@ def console_err() -> Console:
 
 
 def log(tag: str, message: str, *, err: bool = False) -> None:
+    """Print a tagged line; message is literal text (no Rich markup parsing)."""
     c = console_err() if err else _console
-    c.print(f"[bold]{tag}[/bold] {message}")
+    line = Text()
+    line.append(tag, style="bold")
+    line.append(" ")
+    line.append(message)
+    c.print(line)
 
 
 def log_ok(message: str) -> None:
@@ -47,13 +51,15 @@ def log_doctor(message: str) -> None:
 
 
 def print_actionable(title: str, lines: list[str]) -> None:
-    _console.print(f"[bold]{title}[/bold]")
+    head = Text()
+    head.append(title, style="bold")
+    _console.print(head)
     for line in lines:
-        _console.print(f"  {line}")
+        _console.print(Text(f"  {line}"))
 
 
 def exit_with_hint(code: int, message: str, hint_lines: list[str]) -> None:
     log_error(message)
     for h in hint_lines:
-        _console.print(f"  {h}")
+        _console.print(Text(f"  {h}"))
     raise SystemExit(code)
