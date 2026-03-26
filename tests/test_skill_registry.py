@@ -35,10 +35,16 @@ def test_default_registry_contains_mvp_skills() -> None:
         "extract_page_text",
         "finish_task",
         "get_interactive_elements",
+        "inspect_dialog",
         "navigate",
         "observe_page",
+        "press_key",
         "request_confirmation",
+        "scroll_viewport",
+        "select_option",
         "type_text",
+        "upload_file",
+        "wait_for_element",
     ]
 
 

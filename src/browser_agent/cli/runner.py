@@ -1,13 +1,19 @@
-"""Terminal-style CLI for the browser agent runtime."""
+"""Core run loop CLI (`browser-agent run` / bare task) for the browser agent runtime."""
 
 from __future__ import annotations
 
 import argparse
 import json
+import sys
+from argparse import Namespace
 from typing import Sequence
 
 from browser_agent.browser.engine import PlaywrightBrowserEngine
-from browser_agent.config import RuntimeSettings
+from browser_agent.config import (
+    RuntimeSettings,
+    home_config_path,
+    planner_env_configured,
+)
 from browser_agent.llm.parser import PlannerResponseParser
 from browser_agent.llm.planner import LLMPlanner
 from browser_agent.llm.provider import (
@@ -16,7 +22,7 @@ from browser_agent.llm.provider import (
     TrackingLLMProvider,
 )
 from browser_agent.runtime.loop import RuntimeLoop
-from browser_agent.runtime.models import FinalReport, RuntimeStatus, UserTask
+from browser_agent.runtime.models import FinalReport, RuntimeStatus, UserTask, new_id
 from browser_agent.runtime.session import RuntimeSession
 from browser_agent.runtime.trace import TraceRecorder
 from browser_agent.safety.confirmations import ConfirmationDecision, ConfirmationManager
@@ -24,15 +30,16 @@ from browser_agent.safety.guardrails import SafetyGuardrails
 from browser_agent.skills.registry import build_default_registry
 
 
-def build_parser() -> argparse.ArgumentParser:
-    """Create the CLI argument parser."""
+def build_run_parser() -> argparse.ArgumentParser:
+    """Create the parser for `browser-agent run` (and legacy bare-task invocation)."""
 
     parser = argparse.ArgumentParser(
-        prog="browser-agent",
+        prog="browser-agent run",
         description=(
             "Run the browser agent multi-step runtime. "
             "Use --ui for the Rich Agent Console (live phases, steps, tokens, confirmations)."
         ),
+        add_help=True,
     )
     parser.add_argument("task", nargs="?", help="Natural-language task to run.")
     parser.add_argument("--start-url", help="Optional starting URL for the session.")
@@ -66,7 +73,129 @@ def build_parser() -> argparse.ArgumentParser:
             "Incompatible with --json."
         ),
     )
+    parser.add_argument(
+        "--skip-setup-check",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     return parser
+
+
+def parse_run_args(argv: Sequence[str] | None) -> Namespace:
+    """Parse run-mode argv."""
+
+    parser = build_run_parser()
+    return parser.parse_args(list(argv) if argv is not None else None)
+
+
+def run_cli_from_args(args: Namespace, *, task_override: str | None = None) -> FinalReport:
+    """Execute the runtime from a parsed run-namespace."""
+
+    if args.ui and args.json:
+        print("[ERROR] --ui and --json cannot be used together.", file=sys.stderr)
+        report = FinalReport(
+            session_id=new_id("session"),
+            status=RuntimeStatus.STOPPED,
+            summary="Invalid CLI flags.",
+            completed=False,
+            step_count=0,
+        )
+        return report
+
+    task_text = task_override if task_override is not None else (args.task or input("Task> ").strip())
+    settings = RuntimeSettings.from_env()
+    if args.max_steps is not None:
+        settings = settings.model_copy(update={"max_steps": args.max_steps})
+    if args.headed:
+        settings = settings.model_copy(update={"headless": False})
+    if args.capture_screenshots:
+        settings = settings.model_copy(update={"capture_screenshots": True})
+
+    if not getattr(args, "skip_setup_check", False) and not planner_env_configured(settings):
+        report = FinalReport(
+            session_id=new_id("session"),
+            status=RuntimeStatus.STOPPED,
+            summary=(
+                "Setup required. Configure the planner API (global config or environment).\n\n"
+                f"Run: browser-agent setup\n\n"
+                f"Config file: {home_config_path()}"
+            ),
+            completed=False,
+            next_steps=[
+                "Run `browser-agent setup` to create ~/.browser-agent/config.yaml",
+                "Or set BROWSER_AGENT_PLANNER_* environment variables (see .env.example).",
+                "Run `browser-agent doctor` to verify your installation.",
+            ],
+            step_count=0,
+        )
+        if args.json:
+            print(json.dumps(report.model_dump(mode="json"), indent=2))
+        else:
+            print(render_text_report(report, session=None))
+        return report
+
+    task = UserTask(
+        request=task_text,
+        start_url=args.start_url,
+    )
+    session = RuntimeSession(task=task, settings=settings)
+    skill_registry = build_default_registry()
+    planner, planner_error = build_planner(settings, skill_registry, session=session)
+    if planner is None:
+        report = FinalReport(
+            session_id=session.session_id,
+            status=RuntimeStatus.STOPPED,
+            summary=planner_error or "Planner is not configured.",
+            completed=False,
+            next_steps=[
+                "Set `BROWSER_AGENT_PLANNER_ENABLED=true`.",
+                "Set `BROWSER_AGENT_PLANNER_PROVIDER` to `openai_compatible` or `google_compatible`.",
+                "Set `BROWSER_AGENT_PLANNER_BASE_URL` to the provider endpoint.",
+                "Set `BROWSER_AGENT_PLANNER_MODEL` to the planner model name.",
+                "Set `BROWSER_AGENT_PLANNER_API_KEY` to your API key.",
+                "Or run: browser-agent setup",
+            ],
+            step_count=0,
+        )
+        if args.json:
+            print(json.dumps(report.model_dump(mode="json"), indent=2))
+        else:
+            print(render_text_report(report, session=session))
+        return report
+
+    browser = build_browser_engine(settings)
+    if args.ui:
+        from browser_agent.ui.console import AgentConsoleApp
+
+        console_app = AgentConsoleApp(session=session, settings=settings)
+        loop = RuntimeLoop(
+            planner=planner,
+            skill_registry=skill_registry,
+            browser=browser,
+            safety_guardrails=SafetyGuardrails(),
+            confirmation_manager=ConfirmationManager(),
+            trace_recorder=TraceRecorder(trace_dir=settings.trace_dir),
+            event_emitter=console_app,
+            planner_display_name=settings.planner_model,
+            planner_provider_kind=settings.planner_provider,
+        )
+        return console_app.run_interactive_loop(loop)
+
+    loop = RuntimeLoop(
+        planner=planner,
+        skill_registry=skill_registry,
+        browser=browser,
+        safety_guardrails=SafetyGuardrails(),
+        confirmation_manager=ConfirmationManager(),
+        trace_recorder=TraceRecorder(trace_dir=settings.trace_dir),
+    )
+    report = run_cli_interactive(loop, session, args_json=args.json)
+
+    if args.json:
+        print(json.dumps(report.model_dump(mode="json"), indent=2))
+    else:
+        print(render_text_report(report, session=session))
+    return report
 
 
 def build_browser_engine(settings: RuntimeSettings) -> PlaywrightBrowserEngine:
@@ -319,82 +448,8 @@ def build_planner(
 def run_cli(argv: Sequence[str] | None = None) -> FinalReport:
     """Run the multi-step runtime and return the final report."""
 
-    parser = build_parser()
-    args = parser.parse_args(list(argv) if argv is not None else None)
-
-    if args.ui and args.json:
-        parser.error("--ui and --json cannot be used together.")
-
-    task_text = args.task or input("Task> ").strip()
-    settings = RuntimeSettings.from_env()
-    if args.max_steps is not None:
-        settings = settings.model_copy(update={"max_steps": args.max_steps})
-    if args.headed:
-        settings = settings.model_copy(update={"headless": False})
-    if args.capture_screenshots:
-        settings = settings.model_copy(update={"capture_screenshots": True})
-
-    task = UserTask(
-        request=task_text,
-        start_url=args.start_url,
-    )
-    session = RuntimeSession(task=task, settings=settings)
-    skill_registry = build_default_registry()
-    planner, planner_error = build_planner(settings, skill_registry, session=session)
-    if planner is None:
-        report = FinalReport(
-            session_id=session.session_id,
-            status=RuntimeStatus.STOPPED,
-            summary=planner_error or "Planner is not configured.",
-            completed=False,
-            next_steps=[
-                "Set `BROWSER_AGENT_PLANNER_ENABLED=true`.",
-                "Set `BROWSER_AGENT_PLANNER_PROVIDER` to `openai_compatible` or `google_compatible`.",
-                "Set `BROWSER_AGENT_PLANNER_BASE_URL` to the provider endpoint.",
-                "Set `BROWSER_AGENT_PLANNER_MODEL` to the planner model name.",
-                "Set `BROWSER_AGENT_PLANNER_API_KEY` to your API key.",
-            ],
-            step_count=0,
-        )
-        if args.json:
-            print(json.dumps(report.model_dump(mode="json"), indent=2))
-        else:
-            print(render_text_report(report, session=session))
-        return report
-
-    browser = build_browser_engine(settings)
-    if args.ui:
-        from browser_agent.ui.console import AgentConsoleApp
-
-        console_app = AgentConsoleApp(session=session, settings=settings)
-        loop = RuntimeLoop(
-            planner=planner,
-            skill_registry=skill_registry,
-            browser=browser,
-            safety_guardrails=SafetyGuardrails(),
-            confirmation_manager=ConfirmationManager(),
-            trace_recorder=TraceRecorder(trace_dir=settings.trace_dir),
-            event_emitter=console_app,
-            planner_display_name=settings.planner_model,
-            planner_provider_kind=settings.planner_provider,
-        )
-        return console_app.run_interactive_loop(loop)
-
-    loop = RuntimeLoop(
-        planner=planner,
-        skill_registry=skill_registry,
-        browser=browser,
-        safety_guardrails=SafetyGuardrails(),
-        confirmation_manager=ConfirmationManager(),
-        trace_recorder=TraceRecorder(trace_dir=settings.trace_dir),
-    )
-    report = run_cli_interactive(loop, session, args_json=args.json)
-
-    if args.json:
-        print(json.dumps(report.model_dump(mode="json"), indent=2))
-    else:
-        print(render_text_report(report, session=session))
-    return report
+    args = parse_run_args(argv)
+    return run_cli_from_args(args)
 
 
 def prompt_for_confirmation(report: FinalReport) -> ConfirmationDecision | None:
@@ -448,7 +503,7 @@ def prompt_for_user_answer(report: FinalReport) -> str | None:
     print("-" * 60)
 
     answer = input("Your answer: ").strip()
-    return answer if answer else None
+    return answer
 
 
 def is_terminal_status(status: RuntimeStatus) -> bool:
@@ -511,7 +566,7 @@ def run_cli_interactive(
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """CLI entrypoint used by the console script."""
+    """Legacy entrypoint; prefer browser_agent.cli.main:app."""
 
     run_cli(argv)
     return 0

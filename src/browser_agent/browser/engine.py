@@ -735,7 +735,8 @@ class PlaywrightBrowserEngine:
                 code = "browser_executable_missing"
                 message = (
                     "Failed to start the Playwright browser runtime because browser "
-                    "binaries are missing. Run `playwright install`."
+                    "binaries are missing. Run: python -m playwright install chromium "
+                    "(or: browser-agent setup)."
                 )
             raise BrowserRuntimeError(
                 code,

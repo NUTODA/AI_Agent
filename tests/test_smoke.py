@@ -6,7 +6,7 @@ import json
 
 from browser_agent.browser.engine import StubBrowserEngine
 from browser_agent.browser.page_state import PageState
-from browser_agent.cli.app import run_cli
+from browser_agent.cli.runner import run_cli
 from browser_agent.llm.planner import PlannerDecision
 from browser_agent.runtime.models import (
     PlannerDecisionType,
@@ -35,7 +35,7 @@ def test_cli_reports_missing_planner_configuration_in_json_output(
     monkeypatch.setenv("BROWSER_AGENT_ARTIFACT_DIR", str(tmp_path / "artifacts"))
     monkeypatch.setenv("BROWSER_AGENT_PLANNER_ENABLED", "false")
 
-    report = run_cli(["--json", "Review my inbox for spam"])
+    report = run_cli(["--json", "--skip-setup-check", "Review my inbox for spam"])
     captured = capsys.readouterr()
     payload = json.loads(captured.out)
 
@@ -53,7 +53,7 @@ def test_cli_runs_multistep_runtime_with_configured_planner(
     monkeypatch.setenv("BROWSER_AGENT_TRACE_DIR", str(tmp_path / "traces"))
     monkeypatch.setenv("BROWSER_AGENT_ARTIFACT_DIR", str(tmp_path / "artifacts"))
     monkeypatch.setattr(
-        "browser_agent.cli.app.build_planner",
+        "browser_agent.cli.runner.build_planner",
         lambda settings, skill_registry, session=None: (
             QueuePlanner(
                 [
@@ -79,7 +79,7 @@ def test_cli_runs_multistep_runtime_with_configured_planner(
         ),
     )
     monkeypatch.setattr(
-        "browser_agent.cli.app.build_browser_engine",
+        "browser_agent.cli.runner.build_browser_engine",
         lambda settings: StubBrowserEngine(
             PageState(
                 url="https://example.com/fixture",
@@ -90,7 +90,7 @@ def test_cli_runs_multistep_runtime_with_configured_planner(
         ),
     )
 
-    report = run_cli(["--json", "Inspect the current page"])
+    report = run_cli(["--json", "--skip-setup-check", "Inspect the current page"])
     captured = capsys.readouterr()
     payload = json.loads(captured.out)
 

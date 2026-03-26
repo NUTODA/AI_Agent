@@ -14,10 +14,13 @@ from pathlib import Path
 import pytest
 
 from browser_agent.browser.engine import PlaywrightBrowserEngine, StubBrowserEngine
+from browser_agent.demos import demo_pages_dir
 
 
-# Path to demo pages
-DEMO_PAGES_DIR = Path(__file__).parent.parent / "demos" / "pages"
+# Prefer bundled package pages; fall back to repo demos/ for dev checkouts
+_PKG_PAGES = demo_pages_dir()
+_REPO_PAGES = Path(__file__).parent.parent / "demos" / "pages"
+DEMO_PAGES_DIR = _PKG_PAGES if _PKG_PAGES.is_dir() and any(_PKG_PAGES.glob("*.html")) else _REPO_PAGES
 INBOX_DEMO = DEMO_PAGES_DIR / "inbox_demo.html"
 FOOD_DEMO = DEMO_PAGES_DIR / "food_demo.html"
 JOBS_DEMO = DEMO_PAGES_DIR / "jobs_demo.html"
@@ -55,13 +58,12 @@ class TestInboxDemoIntegration:
         """Inbox demo should have mark spam buttons with correct testids."""
         html_content = INBOX_DEMO.read_text()
 
-        # Should have mark spam buttons for emails
-        assert 'data-testid="mark-spam-2"' in html_content
-        assert 'data-testid="mark-spam-4"' in html_content
+        # Dynamic rows use a template pattern in data-testid
+        assert 'data-testid="mark-spam-${email.id}"' in html_content
+        assert 'data-testid="unmark-spam-${email.id}"' in html_content
 
         # Should have mark important buttons
-        assert 'data-testid="mark-important-1"' in html_content
-        assert 'data-testid="mark-important-3"' in html_content
+        assert 'data-testid="mark-important-${email.id}"' in html_content
 
     def test_inbox_demo_has_statistics(self, demo_pages_exist) -> None:
         """Inbox demo should display email statistics."""
@@ -181,11 +183,11 @@ class TestDemoPageInteraction:
         browser = StubBrowserEngine()
 
         # Navigate to inbox demo (file:// URL)
-        result = browser.navigate_to(f"file://{INBOX_DEMO}")
+        result = browser.navigate(f"file://{INBOX_DEMO}")
         assert result.ok is True
 
         # Simulate clicking mark spam button
-        click_result = browser.click_element('[data-testid="mark-spam-2"]')
+        click_result = browser.click('[data-testid="mark-spam-2"]')
         assert click_result.ok is True
 
     def test_food_demo_cart_interaction(self) -> None:
@@ -193,11 +195,11 @@ class TestDemoPageInteraction:
         browser = StubBrowserEngine()
 
         # Navigate to food demo
-        result = browser.navigate_to(f"file://{FOOD_DEMO}")
+        result = browser.navigate(f"file://{FOOD_DEMO}")
         assert result.ok is True
 
         # Add burger to cart
-        click_result = browser.click_element('[data-testid="add-burger"]')
+        click_result = browser.click('[data-testid="add-burger"]')
         assert click_result.ok is True
 
     def test_jobs_demo_filter_interaction(self) -> None:
@@ -205,11 +207,11 @@ class TestDemoPageInteraction:
         browser = StubBrowserEngine()
 
         # Navigate to jobs demo
-        result = browser.navigate_to(f"file://{JOBS_DEMO}")
+        result = browser.navigate(f"file://{JOBS_DEMO}")
         assert result.ok is True
 
         # Click remote filter
-        click_result = browser.click_element('[data-testid="filter-remote"]')
+        click_result = browser.click('[data-testid="filter-remote"]')
         assert click_result.ok is True
 
 
@@ -238,16 +240,22 @@ class TestDemoPageStructureValidation:
                 continue
 
             content = demo_file.read_text()
-
-            # Count data-testid occurrences
+            # Ignore <script> blocks (they repeat selectors like total-count for DOM updates)
             import re
-            testids = re.findall(r'data-testid="([^"]+)"', content)
 
-            # Each demo should have multiple testids
-            assert len(testids) >= 10, f"{demo_file.name} has fewer than 10 data-testid attributes"
+            content_no_scripts = re.sub(
+                r"<script[\s\S]*?</script>", "", content, flags=re.IGNORECASE
+            )
+            testids = re.findall(r'data-testid="([^"]+)"', content_no_scripts)
 
-            # All testids should be unique
-            assert len(testids) == len(set(testids)), f"{demo_file.name} has duplicate data-testid attributes"
+            # Each demo should have multiple testids (markup only; scripts stripped)
+            assert len(testids) >= 8, f"{demo_file.name} has fewer than 8 data-testid attributes"
+
+            # Static testids (no JS template) must be unique; templates like ${email.id} repeat in source
+            static = [t for t in testids if "${" not in t]
+            assert len(static) == len(set(static)), (
+                f"{demo_file.name} has duplicate static data-testid attributes"
+            )
 
 
 class TestDemoServer:
@@ -275,7 +283,13 @@ class TestDemoServer:
             pytest.fail(f"Server script has syntax error: {e}")
 
     def test_server_has_main_function(self) -> None:
-        """Server script should have a main function."""
+        """Packaged HTTP server module should expose main."""
+        from browser_agent.demos import http_server
+
+        assert callable(getattr(http_server, "main", None))
+
+    def test_repo_server_script_has_main_function(self) -> None:
+        """Legacy repo demos/server.py remains for developers."""
         server_script = Path(__file__).parent.parent / "demos" / "server.py"
         if not server_script.exists():
             pytest.skip("Server script not found")

@@ -53,28 +53,47 @@ src/browser_agent/     Runtime, browser, safety, skills, CLI, and UI (Rich conso
 tests/                 Smoke and contract tests for the foundation
 ```
 
+## Quick start (pipx)
+
+Requires **Python 3.10+** on your PATH. Install [pipx](https://pypa.github.io/pipx/) first, then:
+
+```bash
+pipx install browser-agent-foundation
+browser-agent setup
+browser-agent doctor
+browser-agent demo food --ui
+```
+
+- Global config is written to `~/.browser-agent/config.yaml` (API key is never printed after save).
+- Demos use **bundled local HTML** and start a small HTTP server on `127.0.0.1` automatically; **no internet** is required for the pages (the LLM still needs your configured API).
+- To publish under the name `browser-agent` on PyPI, rename the distribution in `pyproject.toml` and release separately.
+
+Other commands: `browser-agent status`, `browser-agent reset`, `browser-agent --version`.
+
 ## Running The Runtime
 
 1. Create a virtual environment.
 2. Install the package with development dependencies.
 3. Install Playwright browser binaries.
-4. Configure the planner.
+4. Configure the planner (or run `browser-agent setup`).
 5. Run the CLI.
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -e .[dev]
-playwright install chromium
+python -m playwright install chromium
 browser-agent "Review my inbox for spam"
 ```
 
 You can also pass flags:
 
 ```bash
-browser-agent --headed --start-url https://example.com --max-steps 12 "Inspect the page"
+browser-agent run --headed --start-url https://example.com --max-steps 12 "Inspect the page"
 browser-agent --capture-screenshots --start-url https://example.com --json "Observe the current page"
 ```
+
+Bare task text is still supported (`browser-agent "task"`) and is treated as `browser-agent run`.
 
 ### Agent Console UI (`--ui`)
 
@@ -238,13 +257,23 @@ This repository still does not claim unrestricted general autonomy. The loop is 
 
 The repository includes controlled demo pages for reproducible testing and demonstrations.
 
-### Start the Demo Server
+### Packaged command (recommended)
+
+After install, scenarios start the local server automatically:
+
+```bash
+browser-agent demo food --ui
+browser-agent demo jobs --ui
+browser-agent demo spam --ui
+```
+
+### Start the Demo Server (development tree)
 
 ```bash
 python demos/server.py
 ```
 
-The server will start on port 8765 and print URLs for all demo pages.
+The server will start on port 8765 and print URLs for all demo pages. The same pages are bundled under `src/browser_agent/demos/pages/` for pip installs.
 
 ### Available Demos
 

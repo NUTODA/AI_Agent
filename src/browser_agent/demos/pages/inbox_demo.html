@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Inbox Demo - Browser Agent</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            overflow: hidden;
+        }
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+        .header h1 { font-size: 2rem; margin-bottom: 10px; }
+        .header p { opacity: 0.9; }
+        .stats {
+            display: flex;
+            justify-content: center;
+            gap: 40px;
+            margin-top: 20px;
+        }
+        .stat { text-align: center; }
+        .stat-value {
+            font-size: 2rem;
+            font-weight: bold;
+        }
+        .stat-label { font-size: 0.9rem; opacity: 0.9; }
+        .filters {
+            display: flex;
+            gap: 10px;
+            padding: 20px 30px;
+            background: #f8f9fa;
+            border-bottom: 1px solid #e9ecef;
+        }
+        .filter-btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            transition: all 0.2s;
+        }
+        .filter-btn.active {
+            background: #667eea;
+            color: white;
+        }
+        .filter-btn:not(.active) {
+            background: white;
+            color: #495057;
+            border: 1px solid #dee2e6;
+        }
+        .filter-btn:hover:not(.active) {
+            background: #e9ecef;
+        }
+        .email-list {
+            padding: 0;
+        }
+        .email-item {
+            display: flex;
+            align-items: center;
+            padding: 20px 30px;
+            border-bottom: 1px solid #e9ecef;
+            transition: background 0.2s;
+        }
+        .email-item:hover {
+            background: #f8f9fa;
+        }
+        .email-item.spam {
+            background: #fff3cd;
+        }
+        .email-item.important {
+            background: #d1ecf1;
+        }
+        .email-checkbox {
+            margin-right: 15px;
+            width: 18px;
+            height: 18px;
+        }
+        .email-content {
+            flex: 1;
+            min-width: 0;
+        }
+        .email-sender {
+            font-weight: 600;
+            color: #212529;
+            margin-bottom: 5px;
+        }
+        .email-subject {
+            color: #495057;
+            margin-bottom: 5px;
+        }
+        .email-preview {
+            color: #6c757d;
+            font-size: 0.85rem;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .email-meta {
+            text-align: right;
+            margin-left: 20px;
+        }
+        .email-date {
+            color: #6c757d;
+            font-size: 0.85rem;
+            margin-bottom: 10px;
+        }
+        .email-actions {
+            display: flex;
+            gap: 8px;
+        }
+        .action-btn {
+            padding: 6px 12px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.8rem;
+            transition: all 0.2s;
+        }
+        .btn-spam {
+            background: #dc3545;
+            color: white;
+        }
+        .btn-spam:hover { background: #c82333; }
+        .btn-important {
+            background: #17a2b8;
+            color: white;
+        }
+        .btn-important:hover { background: #138496; }
+        .btn-unmark {
+            background: #6c757d;
+            color: white;
+        }
+        .btn-unmark:hover { background: #5a6268; }
+        .badge {
+            display: inline-block;
+            padding: 3px 8px;
+            border-radius: 3px;
+            font-size: 0.7rem;
+            font-weight: bold;
+            text-transform: uppercase;
+            margin-left: 10px;
+        }
+        .badge-spam {
+            background: #dc3545;
+            color: white;
+        }
+        .badge-important {
+            background: #17a2b8;
+            color: white;
+        }
+        .empty-state {
+            text-align: center;
+            padding: 60px 30px;
+            color: #6c757d;
+        }
+        .empty-state h3 {
+            color: #495057;
+            margin-bottom: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1 data-testid="inbox-title">My Inbox</h1>
+            <p>Demo page for email management tasks</p>
+            <div class="stats">
+                <div class="stat">
+                    <div class="stat-value" data-testid="total-count">5</div>
+                    <div class="stat-label">Total</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-value" data-testid="spam-count">0</div>
+                    <div class="stat-label">Spam</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-value" data-testid="important-count">0</div>
+                    <div class="stat-label">Important</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="filters">
+            <button class="filter-btn active" data-testid="filter-all" onclick="filterEmails('all')">All Emails</button>
+            <button class="filter-btn" data-testid="filter-spam" onclick="filterEmails('spam')">Spam</button>
+            <button class="filter-btn" data-testid="filter-important" onclick="filterEmails('important')">Important</button>
+        </div>
+
+        <div class="email-list" data-testid="email-list">
+            <!-- Emails will be populated by JavaScript -->
+        </div>
+    </div>
+
+    <script>
+        // Sample email data
+        const initialEmails = [
+            {
+                id: 1,
+                sender: "Amazon.com",
+                subject: "Your order has shipped!",
+                preview: "Your recent order #12345 is on its way. Track your package...",
+                date: "Today, 2:30 PM",
+                isSpam: false,
+                isImportant: false
+            },
+            {
+                id: 2,
+                sender: "PrinceNigeria",
+                subject: "URGENT: You won $10,000,000!",
+                preview: "Dear friend, I am Prince from Nigeria and I need your help...",
+                date: "Today, 1:15 PM",
+                isSpam: false,
+                isImportant: false
+            },
+            {
+                id: 3,
+                sender: "Sarah from HR",
+                subject: "Important: Benefits enrollment deadline",
+                preview: "Please complete your benefits enrollment by Friday. Don't miss out...",
+                date: "Yesterday, 4:00 PM",
+                isSpam: false,
+                isImportant: false
+            },
+            {
+                id: 4,
+                sender: "GetRichQuick",
+                subject: "Make money fast! Work from home!",
+                preview: "Earn $5000/week from home. No experience needed. Click here now...",
+                date: "Yesterday, 11:30 AM",
+                isSpam: false,
+                isImportant: false
+            },
+            {
+                id: 5,
+                sender: "Mom",
+                subject: "Family dinner this weekend?",
+                preview: "Hi honey, are you coming for dinner on Sunday? Dad is making his...",
+                date: "2 days ago",
+                isSpam: false,
+                isImportant: false
+            }
+        ];
+
+        // Load emails from localStorage or use initial data
+        let emails = JSON.parse(localStorage.getItem('inbox_emails')) || initialEmails;
+
+        function saveEmails() {
+            localStorage.setItem('inbox_emails', JSON.stringify(emails));
+            updateStats();
+        }
+
+        function updateStats() {
+            const total = emails.length;
+            const spam = emails.filter(e => e.isSpam).length;
+            const important = emails.filter(e => e.isImportant).length;
+
+            document.querySelector('[data-testid="total-count"]').textContent = total;
+            document.querySelector('[data-testid="spam-count"]').textContent = spam;
+            document.querySelector('[data-testid="important-count"]').textContent = important;
+        }
+
+        function renderEmails(filter = 'all') {
+            const container = document.querySelector('[data-testid="email-list"]');
+            container.innerHTML = '';
+
+            let filteredEmails = emails;
+            if (filter === 'spam') {
+                filteredEmails = emails.filter(e => e.isSpam);
+            } else if (filter === 'important') {
+                filteredEmails = emails.filter(e => e.isImportant);
+            }
+
+            if (filteredEmails.length === 0) {
+                container.innerHTML = `
+                    <div class="empty-state">
+                        <h3>No emails to display</h3>
+                        <p>The ${filter} folder is empty.</p>
+                    </div>
+                `;
+                return;
+            }
+
+            filteredEmails.forEach(email => {
+                const item = document.createElement('div');
+                item.className = 'email-item';
+                if (email.isSpam) item.classList.add('spam');
+                if (email.isImportant) item.classList.add('important');
+                item.setAttribute('data-testid', `email-${email.id}`);
+
+                let badges = '';
+                if (email.isSpam) badges += '<span class="badge badge-spam">Spam</span>';
+                if (email.isImportant) badges += '<span class="badge badge-important">Important</span>';
+
+                let actionButtons = '';
+                if (!email.isSpam && !email.isImportant) {
+                    actionButtons = `
+                        <button class="action-btn btn-spam" data-testid="mark-spam-${email.id}" onclick="markAsSpam(${email.id})">Mark Spam</button>
+                        <button class="action-btn btn-important" data-testid="mark-important-${email.id}" onclick="markAsImportant(${email.id})">Mark Important</button>
+                    `;
+                } else if (email.isSpam) {
+                    actionButtons = `
+                        <button class="action-btn btn-unmark" data-testid="unmark-spam-${email.id}" onclick="unmark(${email.id})">Not Spam</button>
+                    `;
+                } else if (email.isImportant) {
+                    actionButtons = `
+                        <button class="action-btn btn-unmark" data-testid="unmark-important-${email.id}" onclick="unmark(${email.id})">Remove Important</button>
+                    `;
+                }
+
+                item.innerHTML = `
+                    <input type="checkbox" class="email-checkbox" data-testid="checkbox-${email.id}">
+                    <div class="email-content">
+                        <div class="email-sender" data-testid="sender-${email.id}">
+                            ${email.sender}${badges}
+                        </div>
+                        <div class="email-subject" data-testid="subject-${email.id}">${email.subject}</div>
+                        <div class="email-preview" data-testid="preview-${email.id}">${email.preview}</div>
+                    </div>
+                    <div class="email-meta">
+                        <div class="email-date" data-testid="date-${email.id}">${email.date}</div>
+                        <div class="email-actions">
+                            ${actionButtons}
+                        </div>
+                    </div>
+                `;
+
+                container.appendChild(item);
+            });
+        }
+
+        function markAsSpam(id) {
+            const email = emails.find(e => e.id === id);
+            if (email) {
+                email.isSpam = true;
+                email.isImportant = false;
+                saveEmails();
+                renderEmails(getCurrentFilter());
+            }
+        }
+
+        function markAsImportant(id) {
+            const email = emails.find(e => e.id === id);
+            if (email) {
+                email.isImportant = true;
+                email.isSpam = false;
+                saveEmails();
+                renderEmails(getCurrentFilter());
+            }
+        }
+
+        function unmark(id) {
+            const email = emails.find(e => e.id === id);
+            if (email) {
+                email.isSpam = false;
+                email.isImportant = false;
+                saveEmails();
+                renderEmails(getCurrentFilter());
+            }
+        }
+
+        function getCurrentFilter() {
+            const activeBtn = document.querySelector('.filter-btn.active');
+            if (activeBtn.getAttribute('data-testid') === 'filter-spam') return 'spam';
+            if (activeBtn.getAttribute('data-testid') === 'filter-important') return 'important';
+            return 'all';
+        }
+
+        function filterEmails(type) {
+            document.querySelectorAll('.filter-btn').forEach(btn => btn.classList.remove('active'));
+            document.querySelector(`[data-testid="filter-${type}"]`).classList.add('active');
+            renderEmails(type);
+        }
+
+        // Initialize
+        updateStats();
+        renderEmails();
+
+        // Expose functions for testing
+        window.markAsSpam = markAsSpam;
+        window.markAsImportant = markAsImportant;
+        window.unmark = unmark;
+        window.filterEmails = filterEmails;
+    </script>
+</body>
+</html>

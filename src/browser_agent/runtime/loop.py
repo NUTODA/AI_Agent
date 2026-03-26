@@ -1093,9 +1093,10 @@ class RuntimeLoop:
 
     def _startup_next_steps(self, exc: Exception) -> list[str]:
         message = str(exc)
-        if "playwright install" in message.lower():
+        if "playwright install" in message.lower() or "executable doesn't exist" in message.lower():
             return [
-                "Run `playwright install` to install the required browser binaries.",
+                "Run `python -m playwright install chromium` (same Python as pipx uses).",
+                "Or run: browser-agent setup",
                 "Retry the CLI after the browser runtime is available.",
             ]
         return [

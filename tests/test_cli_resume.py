@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from browser_agent.cli.app import (
+from browser_agent.cli.runner import (
     is_terminal_status,
     prompt_for_confirmation,
     prompt_for_user_answer,
@@ -24,6 +24,8 @@ from browser_agent.runtime.models import (
     RiskLevel,
     RuntimeStatus,
 )
+
+_SID = "test_session_cli_resume"
 from browser_agent.safety.confirmations import ConfirmationDecision
 
 
@@ -61,6 +63,7 @@ class TestPromptForConfirmation:
     def test_returns_none_when_no_pending_confirmation(self) -> None:
         """Should return None if report has no pending confirmation."""
         report = FinalReport(
+            session_id=_SID,
             status=RuntimeStatus.COMPLETED,
             summary="Test",
         )
@@ -69,6 +72,7 @@ class TestPromptForConfirmation:
     def test_returns_decision_with_approved_true_for_yes(self, monkeypatch) -> None:
         """Should return approved decision when user inputs yes."""
         report = FinalReport(
+            session_id=_SID,
             status=RuntimeStatus.WAITING_FOR_CONFIRMATION,
             summary="Test",
             pending_confirmation=ConfirmationRequest(
@@ -92,6 +96,7 @@ class TestPromptForConfirmation:
     def test_returns_decision_with_approved_false_for_no(self, monkeypatch) -> None:
         """Should return rejected decision when user inputs no."""
         report = FinalReport(
+            session_id=_SID,
             status=RuntimeStatus.WAITING_FOR_CONFIRMATION,
             summary="Test",
             pending_confirmation=ConfirmationRequest(
@@ -117,6 +122,7 @@ class TestPromptForConfirmation:
     def test_accepts_y_as_shorthand_for_yes(self, monkeypatch) -> None:
         """Should accept 'y' as shorthand for 'yes'."""
         report = FinalReport(
+            session_id=_SID,
             status=RuntimeStatus.WAITING_FOR_CONFIRMATION,
             summary="Test",
             pending_confirmation=ConfirmationRequest(
@@ -138,6 +144,7 @@ class TestPromptForConfirmation:
     def test_accepts_n_as_shorthand_for_no(self, monkeypatch) -> None:
         """Should accept 'n' as shorthand for 'no'."""
         report = FinalReport(
+            session_id=_SID,
             status=RuntimeStatus.WAITING_FOR_CONFIRMATION,
             summary="Test",
             pending_confirmation=ConfirmationRequest(
@@ -160,6 +167,7 @@ class TestPromptForConfirmation:
     def test_rejects_invalid_input_and_reprompts(self, monkeypatch) -> None:
         """Should reject invalid input and prompt again."""
         report = FinalReport(
+            session_id=_SID,
             status=RuntimeStatus.WAITING_FOR_CONFIRMATION,
             summary="Test",
             pending_confirmation=ConfirmationRequest(
@@ -187,6 +195,7 @@ class TestPromptForUserAnswer:
     def test_returns_none_when_no_pending_question(self) -> None:
         """Should return None if report has no pending question."""
         report = FinalReport(
+            session_id=_SID,
             status=RuntimeStatus.COMPLETED,
             summary="Test",
         )
@@ -195,11 +204,11 @@ class TestPromptForUserAnswer:
     def test_returns_user_input(self, monkeypatch) -> None:
         """Should return the user's answer."""
         report = FinalReport(
+            session_id=_SID,
             status=RuntimeStatus.WAITING_FOR_USER,
             summary="Test",
             pending_user_question=PendingUserQuestion(
                 question="What is your email?",
-                context="Need for registration",
             ),
         )
 
@@ -212,6 +221,7 @@ class TestPromptForUserAnswer:
     def test_handles_empty_answer(self, monkeypatch) -> None:
         """Should handle empty user input."""
         report = FinalReport(
+            session_id=_SID,
             status=RuntimeStatus.WAITING_FOR_USER,
             summary="Test",
             pending_user_question=PendingUserQuestion(
@@ -236,6 +246,7 @@ class TestRunCliInteractive:
 
         # Initial report is already complete
         mock_loop.run.return_value = FinalReport(
+            session_id=_SID,
             status=RuntimeStatus.COMPLETED,
             summary="Task done",
         )
@@ -252,6 +263,7 @@ class TestRunCliInteractive:
 
         # First report requires confirmation
         pending_report = FinalReport(
+            session_id=_SID,
             status=RuntimeStatus.WAITING_FOR_CONFIRMATION,
             summary="Waiting",
             pending_confirmation=ConfirmationRequest(
@@ -265,6 +277,7 @@ class TestRunCliInteractive:
 
         # After approval, loop completes
         completed_report = FinalReport(
+            session_id=_SID,
             status=RuntimeStatus.COMPLETED,
             summary="Done",
         )
@@ -291,6 +304,7 @@ class TestRunCliInteractive:
         mock_session = MagicMock()
 
         pending_report = FinalReport(
+            session_id=_SID,
             status=RuntimeStatus.WAITING_FOR_CONFIRMATION,
             summary="Waiting",
             pending_confirmation=ConfirmationRequest(
@@ -303,6 +317,7 @@ class TestRunCliInteractive:
         )
 
         stopped_report = FinalReport(
+            session_id=_SID,
             status=RuntimeStatus.STOPPED,
             summary="User rejected action",
         )
@@ -323,6 +338,7 @@ class TestRunCliInteractive:
         mock_session = MagicMock()
 
         pending_report = FinalReport(
+            session_id=_SID,
             status=RuntimeStatus.WAITING_FOR_USER,
             summary="Waiting for input",
             pending_user_question=PendingUserQuestion(
@@ -331,6 +347,7 @@ class TestRunCliInteractive:
         )
 
         completed_report = FinalReport(
+            session_id=_SID,
             status=RuntimeStatus.COMPLETED,
             summary="Done",
         )
@@ -356,6 +373,7 @@ class TestRunCliInteractive:
 
         # First: waiting for user question
         user_pending = FinalReport(
+            session_id=_SID,
             status=RuntimeStatus.WAITING_FOR_USER,
             summary="Need user input",
             pending_user_question=PendingUserQuestion(question="Email?"),
@@ -363,6 +381,7 @@ class TestRunCliInteractive:
 
         # Second: waiting for confirmation
         confirm_pending = FinalReport(
+            session_id=_SID,
             status=RuntimeStatus.WAITING_FOR_CONFIRMATION,
             summary="Need confirmation",
             pending_confirmation=ConfirmationRequest(
@@ -376,6 +395,7 @@ class TestRunCliInteractive:
 
         # Final: completed
         completed = FinalReport(
+            session_id=_SID,
             status=RuntimeStatus.COMPLETED,
             summary="Done",
         )
@@ -400,6 +420,7 @@ class TestRunCliInteractive:
         mock_session = MagicMock()
 
         pending_report = FinalReport(
+            session_id=_SID,
             status=RuntimeStatus.WAITING_FOR_CONFIRMATION,
             summary="Waiting",
             pending_confirmation=ConfirmationRequest(

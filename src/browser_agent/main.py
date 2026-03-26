@@ -6,7 +6,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from browser_agent.cli.app import main as cli_main
+from browser_agent.config import apply_home_config_to_environment
 
 
 def _load_dotenv_files() -> None:
@@ -16,15 +16,15 @@ def _load_dotenv_files() -> None:
     for name in (".env", ".env.browser-agent"):
         path = cwd / name
         if path.is_file():
+            # Later file wins; values override home config and earlier .env keys.
             load_dotenv(path, override=True)
 
 
 def main() -> int:
-    """Run the CLI entrypoint."""
+    """Run the CLI entrypoint (console script target)."""
 
+    apply_home_config_to_environment()
     _load_dotenv_files()
-    return cli_main()
+    from browser_agent.cli.main import app
 
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+    return app()

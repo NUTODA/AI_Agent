@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 import os
+import stat
 from pathlib import Path
+from typing import Any
 
+import yaml
 from pydantic import BaseModel, Field
+
+# Minimum Python for this package (keep in sync with pyproject requires-python).
+MIN_PYTHON = (3, 10)
 
 
 class RuntimeSettings(BaseModel):
@@ -48,7 +54,8 @@ class RuntimeSettings(BaseModel):
                 "false",
             ).lower()
             == "true",
-            bootstrap_mode=os.getenv("BROWSER_AGENT_BOOTSTRAP_MODE", "true").lower() == "true",
+            bootstrap_mode=os.getenv("BROWSER_AGENT_BOOTSTRAP_MODE", "true").lower()
+            == "true",
             allow_external_navigation=os.getenv(
                 "BROWSER_AGENT_ALLOW_EXTERNAL_NAVIGATION",
                 "true",
@@ -70,3 +77,140 @@ class RuntimeSettings(BaseModel):
                 os.getenv("BROWSER_AGENT_PLANNER_TEMPERATURE", "0")
             ),
         )
+
+
+# --- User home config (~/.browser-agent/config.yaml) ---
+
+
+def home_agent_dir() -> Path:
+    return Path.home() / ".browser-agent"
+
+
+def home_config_path() -> Path:
+    return home_agent_dir() / "config.yaml"
+
+
+class UserHomeConfig(BaseModel):
+    """Friendly fields persisted in ~/.browser-agent/config.yaml."""
+
+    provider: str = "openrouter"
+    base_url: str = ""
+    api_key: str = ""
+    model: str = ""
+
+    def planner_backend(self) -> str:
+        """Maps UI provider label to RuntimeSettings.planner_provider."""
+
+        p = self.provider.lower().strip()
+        if p in ("google", "gemini"):
+            return "google_compatible"
+        return "openai_compatible"
+
+
+def default_base_url_for_provider(label: str) -> str:
+    p = label.lower().strip()
+    if p == "openai":
+        return "https://api.openai.com/v1"
+    if p == "openrouter":
+        return "https://openrouter.ai/api/v1"
+    if p in ("google", "gemini"):
+        return "https://generativelanguage.googleapis.com/v1beta"
+    return "https://api.openai.com/v1"
+
+
+def provider_presets() -> list[tuple[str, str, str]]:
+    """(label, default base_url, example model) for prompts."""
+
+    return [
+        ("openai", "https://api.openai.com/v1", "gpt-4o-mini"),
+        ("openrouter", "https://openrouter.ai/api/v1", "openai/gpt-4o-mini"),
+        ("google", "https://generativelanguage.googleapis.com/v1beta", "gemini-2.0-flash"),
+        ("custom", "", ""),
+    ]
+
+
+def load_home_config_file() -> UserHomeConfig | None:
+    path = home_config_path()
+    if not path.is_file():
+        return None
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(raw, dict):
+        return None
+    return UserHomeConfig(
+        provider=str(raw.get("provider") or "openrouter"),
+        base_url=str(raw.get("base_url") or ""),
+        api_key=str(raw.get("api_key") or ""),
+        model=str(raw.get("model") or ""),
+    )
+
+
+def save_home_config(cfg: UserHomeConfig) -> None:
+    """Write config and restrict permissions when the OS allows it."""
+
+    d = home_agent_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    path = home_config_path()
+    payload = {
+        "provider": cfg.provider,
+        "base_url": cfg.base_url,
+        "api_key": cfg.api_key,
+        "model": cfg.model,
+    }
+    path.write_text(yaml.safe_dump(payload, default_flow_style=False), encoding="utf-8")
+    try:
+        path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    except OSError:
+        pass
+
+
+def delete_home_config_file() -> bool:
+    path = home_config_path()
+    if path.is_file():
+        path.unlink()
+        return True
+    return False
+
+
+def apply_home_config_to_environment() -> None:
+    """Apply ~/.browser-agent/config.yaml to os.environ if keys are unset.
+
+    Precedence: existing environment variables win (user / shell).
+    """
+
+    cfg = load_home_config_file()
+    if cfg is None:
+        return
+
+    def set_if_absent(key: str, value: str | None) -> None:
+        if value is None or value == "":
+            return
+        if os.getenv(key) is None:
+            os.environ[key] = value
+
+    set_if_absent("BROWSER_AGENT_PLANNER_ENABLED", "true")
+    set_if_absent("BROWSER_AGENT_PLANNER_PROVIDER", cfg.planner_backend())
+    set_if_absent("BROWSER_AGENT_PLANNER_BASE_URL", cfg.base_url or None)
+    set_if_absent("BROWSER_AGENT_PLANNER_MODEL", cfg.model or None)
+    set_if_absent("BROWSER_AGENT_PLANNER_API_KEY", cfg.api_key or None)
+
+
+def home_config_covers_planner() -> bool:
+    """True if home config exists and has the minimum fields to run the planner."""
+
+    cfg = load_home_config_file()
+    if cfg is None:
+        return False
+    return bool(cfg.base_url.strip() and cfg.model.strip() and cfg.api_key.strip())
+
+
+def planner_env_configured(settings: RuntimeSettings) -> bool:
+    """Whether planner can be constructed (same rules as build_planner)."""
+
+    if not settings.planner_enabled:
+        return False
+    if settings.planner_provider not in ("openai_compatible", "google_compatible"):
+        return False
+    return bool(settings.planner_base_url and settings.planner_model)

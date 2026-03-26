@@ -2,6 +2,14 @@
 
 This guide explains how to run and understand the controlled demos for the browser agent system.
 
+## Fast path (pipx)
+
+1. Install **Python 3.10+** and [pipx](https://pypa.github.io/pipx/).
+2. `pipx install browser-agent-foundation` (or install from this repo / a future PyPI name).
+3. `browser-agent setup` — installs Chromium via `python -m playwright install chromium`, writes `~/.browser-agent/config.yaml`.
+4. `browser-agent doctor` — verify Playwright, config, and LLM (best effort).
+5. `browser-agent demo food --ui` (or `jobs`, `spam`) — **local pages only**; a small server is started on `127.0.0.1` if needed.
+
 ## Table of Contents
 
 - [Prerequisites](#prerequisites)
@@ -18,29 +26,32 @@ This guide explains how to run and understand the controlled demos for the brows
 Ensure the browser agent is installed and configured:
 
 ```bash
-# Install in editable mode
+# Editable install from a checkout
 pip install -e .
 
-# Verify installation
-browser-agent --help
+# Or pipx (see Fast path above)
+pipx install browser-agent-foundation
 ```
+
+Verify: `browser-agent --version`
 
 ### 2. Configure LLM Provider
 
-The agent requires an LLM provider. Set up one of:
+Use **`browser-agent setup`** (writes `~/.browser-agent/config.yaml`) or set environment variables (see repository `.env.example`):
 
-- **OpenAI-compatible provider** (OpenRouter, etc.):
-  ```bash
-  export OPENAI_API_KEY="your-key"
-  export OPENAI_BASE_URL="https://openrouter.ai/api/v1"
-  ```
-
-- **Google Generative Language**:
-  ```bash
-  export GOOGLE_API_KEY="your-key"
-  ```
+- `BROWSER_AGENT_PLANNER_ENABLED=true`
+- `BROWSER_AGENT_PLANNER_PROVIDER` — `openai_compatible` or `google_compatible`
+- `BROWSER_AGENT_PLANNER_BASE_URL`, `BROWSER_AGENT_PLANNER_MODEL`, `BROWSER_AGENT_PLANNER_API_KEY`
 
 ### 3. Start the Demo Server
+
+**Packaged demos** (no manual server):
+
+```bash
+browser-agent demo spam --ui
+```
+
+**Development tree** — manual server:
 
 ```bash
 python demos/server.py
@@ -53,6 +64,8 @@ The server starts on `http://localhost:8765/` by default.
 For live step-by-step output, token totals, and Rich confirmation prompts during demos:
 
 ```bash
+browser-agent demo food --ui
+# or, with a running server:
 browser-agent --ui --start-url http://localhost:8765/inbox_demo.html "Your task here"
 ```
 
