@@ -61,3 +61,83 @@ def test_resolve_target_candidates_keeps_stale_element_reference_structured() ->
     assert resolution.used_element_reference is True
     assert resolution.matched_element_id == "element_missing"
     assert resolution.candidates == []
+
+
+def test_resolve_target_candidates_returns_all_candidate_types() -> None:
+    """Should return multiple candidate types for an element with rich attributes."""
+    element = InteractiveElementState(
+        element_id="element_rich",
+        name="Search Products",
+        tag="input",
+        role=ElementRole.INPUT,
+        selector="form.search > input",
+        text="",
+        aria_label="Search products",
+        placeholder="Type to search...",
+        attributes={
+            "data-testid": "search-input",
+            "id": "product-search",
+            "name": "q",
+        },
+        input_like=True,
+    )
+
+    resolution = resolve_target_candidates("element_rich", {"element_rich": element})
+
+    assert resolution.used_element_reference is True
+    strategies = [c.strategy for c in resolution.candidates]
+
+    # Should include high-priority selectors
+    assert SelectorStrategy.DATA_TESTID in strategies
+    assert SelectorStrategy.ROLE in strategies
+    assert SelectorStrategy.ARIA_LABEL in strategies
+    assert SelectorStrategy.PLACEHOLDER in strategies
+
+
+def test_resolve_target_candidates_prioritizes_stable_selectors() -> None:
+    """data-testid should be the first/highest priority candidate."""
+    element = InteractiveElementState(
+        element_id="element_priority",
+        name="Add to Cart",
+        tag="button",
+        role=ElementRole.BUTTON,
+        selector="div.product > button",
+        text="Add to Cart",
+        attributes={
+            "data-testid": "add-cart-btn",
+            "id": "cart-button",
+        },
+        clickable=True,
+    )
+
+    resolution = resolve_target_candidates("element_priority", {"element_priority": element})
+
+    # First candidate should be data-testid
+    assert resolution.candidates[0].strategy == SelectorStrategy.DATA_TESTID
+    assert resolution.candidates[0].value == '[data-testid="add-cart-btn"]'
+    # Should have high confidence
+    assert resolution.candidates[0].confidence >= 0.9
+
+
+def test_resolve_target_candidates_handles_raw_selector() -> None:
+    """Raw selectors not in cache should be treated as-is."""
+    resolution = resolve_target_candidates(
+        'button[data-testid="direct-selector"]',
+        {}  # Empty cache
+    )
+
+    assert resolution.used_element_reference is False
+    assert resolution.matched_element_id is None
+    assert len(resolution.candidates) == 1
+    assert resolution.candidates[0].value == 'button[data-testid="direct-selector"]'
+    assert resolution.candidates[0].strategy == SelectorStrategy.RAW
+
+
+def test_resolve_target_candidates_maintains_element_id_format() -> None:
+    """element_id that starts with 'element_' but isn't in cache should be marked as stale."""
+    resolution = resolve_target_candidates("element_stale_but_formatted", {})
+
+    # Should recognize this as an element reference format
+    assert resolution.used_element_reference is True
+    assert resolution.matched_element_id == "element_stale_but_formatted"
+    assert resolution.candidates == []

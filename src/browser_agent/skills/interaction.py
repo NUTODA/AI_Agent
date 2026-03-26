@@ -24,15 +24,16 @@ class ClickElementInput(BaseModel):
     """Input contract for clicking an element.
 
     Either `selector` or `element_id` must be provided (at least one required).
+    ALWAYS prefer `element_id` when the element is in the current observation.
     """
 
-    selector: str | None = Field(
-        default=None,
-        description="CSS selector to find the element. REQUIRED if element_id is not provided.",
-    )
     element_id: str | None = Field(
         default=None,
-        description="Element ID to click. REQUIRED if selector is not provided.",
+        description="PREFERRED: Element ID from current observation (e.g., 'element_abc123'). Use this when the target element appears in the observation's interactive_elements list. This ensures precise targeting.",
+    )
+    selector: str | None = Field(
+        default=None,
+        description="FALLBACK ONLY: CSS or Playwright selector. Only use when element_id is not in observation. Avoid generic text selectors like text='Mark Spam' for repeated controls - they are ambiguous.",
     )
     element_name: str | None = Field(
         default=None,
@@ -98,15 +99,16 @@ class TypeTextInput(BaseModel):
     """Input contract for entering text into an element.
 
     Either `selector` or `element_id` must be provided (at least one required).
+    ALWAYS prefer `element_id` when the element is in the current observation.
     """
 
-    selector: str | None = Field(
-        default=None,
-        description="CSS selector to find the element. REQUIRED if element_id is not provided.",
-    )
     element_id: str | None = Field(
         default=None,
-        description="Element ID to type into. REQUIRED if selector is not provided.",
+        description="PREFERRED: Element ID from current observation. Use this when the target input appears in the observation. This ensures precise targeting.",
+    )
+    selector: str | None = Field(
+        default=None,
+        description="FALLBACK ONLY: CSS or Playwright selector. Only use when element_id is not in observation.",
     )
     text: str = Field(description="Text to type into the element.")
     clear_first: bool = Field(default=True, description="Clear existing text before typing.")
@@ -182,15 +184,16 @@ class SelectOptionInput(BaseModel):
 
     Either `selector` or `element_id` must be provided (at least one required).
     Either `option_value` or `option_text` must be provided (at least one required).
+    ALWAYS prefer `element_id` when the select element is in the current observation.
     """
 
-    selector: str | None = Field(
-        default=None,
-        description="CSS selector to find the select element. REQUIRED if element_id is not provided.",
-    )
     element_id: str | None = Field(
         default=None,
-        description="Element ID of the select element. REQUIRED if selector is not provided.",
+        description="PREFERRED: Element ID from current observation. Use this when the select element appears in the observation. This ensures precise targeting.",
+    )
+    selector: str | None = Field(
+        default=None,
+        description="FALLBACK ONLY: CSS or Playwright selector. Only use when element_id is not in observation.",
     )
     option_value: str | None = Field(
         default=None,
@@ -268,16 +271,20 @@ class SelectOptionSkill(BaseSkill):
 
 
 class PressKeyInput(BaseModel):
-    """Input contract for pressing a keyboard key."""
+    """Input contract for pressing a keyboard key.
+
+    Either `selector` or `element_id` can be provided to target a specific element.
+    ALWAYS prefer `element_id` when the element is in the current observation.
+    """
 
     key: str = Field(description="Key to press (e.g., 'Enter', 'Escape', 'Tab').")
-    selector: str | None = Field(
-        default=None,
-        description="CSS selector to target element (optional, if None key is sent globally).",
-    )
     element_id: str | None = Field(
         default=None,
-        description="Element ID to target (optional, if None key is sent globally).",
+        description="PREFERRED: Element ID from current observation. Use this when the target element appears in the observation. Leave empty for global key press.",
+    )
+    selector: str | None = Field(
+        default=None,
+        description="FALLBACK ONLY: CSS or Playwright selector. Only use when element_id is not in observation. Leave empty for global key press.",
     )
 
 

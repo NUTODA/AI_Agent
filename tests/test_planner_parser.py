@@ -152,3 +152,115 @@ def test_llm_planner_returns_safe_fail_when_provider_errors() -> None:
 
     assert decision.decision_type == PlannerDecisionType.FAIL
     assert "provider error" in (decision.failure_reason or "")
+
+
+def test_parser_accepts_element_id_for_click_element() -> None:
+    """Parser should accept click_element with element_id parameter."""
+    parser = build_parser()
+
+    decision = parser.parse(
+        {
+            "decision_type": "act",
+            "rationale": "Click the spam button using element_id.",
+            "chosen_skill": "click_element",
+            "skill_input": {"element_id": "element_abc123"},
+            "expected_outcome": "The email is marked as spam.",
+            "risk_level": "low",
+            "destructive": False,
+            "completion_confidence": 0.8,
+            "progress_assessment": "partial_progress",
+            "requires_confirmation": False,
+            "user_question": None,
+            "finish_reason": None,
+            "failure_reason": None,
+        }
+    )
+
+    assert decision.decision_type == PlannerDecisionType.ACT
+    assert decision.chosen_skill == "click_element"
+    assert decision.skill_input.get("element_id") == "element_abc123"
+
+
+def test_parser_accepts_selector_fallback_when_element_id_missing() -> None:
+    """Parser should accept click_element with only selector (fallback)."""
+    parser = build_parser()
+
+    decision = parser.parse(
+        {
+            "decision_type": "act",
+            "rationale": "Click using selector fallback.",
+            "chosen_skill": "click_element",
+            "skill_input": {"selector": '[data-testid="custom-btn"]'},
+            "expected_outcome": "Button is clicked.",
+            "risk_level": "low",
+            "destructive": False,
+            "completion_confidence": 0.8,
+            "progress_assessment": "partial_progress",
+            "requires_confirmation": False,
+            "user_question": None,
+            "finish_reason": None,
+            "failure_reason": None,
+        }
+    )
+
+    assert decision.decision_type == PlannerDecisionType.ACT
+    assert decision.chosen_skill == "click_element"
+    assert decision.skill_input.get("selector") == '[data-testid="custom-btn"]'
+
+
+def test_parser_rejects_click_element_without_target() -> None:
+    """Parser should reject click_element without element_id or selector."""
+    parser = build_parser()
+
+    decision = parser.parse(
+        {
+            "decision_type": "act",
+            "rationale": "Click without specifying target.",
+            "chosen_skill": "click_element",
+            "skill_input": {},
+            "expected_outcome": "Nothing happens.",
+            "risk_level": "low",
+            "destructive": False,
+            "completion_confidence": 0.5,
+            "progress_assessment": "unknown",
+            "requires_confirmation": False,
+            "user_question": None,
+            "finish_reason": None,
+            "failure_reason": None,
+        }
+    )
+
+    assert decision.decision_type == PlannerDecisionType.FAIL
+    assert "skill schema" in (decision.failure_reason or "") or "selector" in (decision.failure_reason or "").lower()
+
+
+def test_parser_prefers_element_id_when_both_provided() -> None:
+    """Parser should accept both element_id and selector, preferring element_id at runtime."""
+    parser = build_parser()
+
+    decision = parser.parse(
+        {
+            "decision_type": "act",
+            "rationale": "Click with both identifiers.",
+            "chosen_skill": "click_element",
+            "skill_input": {
+                "element_id": "element_abc123",
+                "selector": 'text="Submit"'
+            },
+            "expected_outcome": "Button is clicked.",
+            "risk_level": "low",
+            "destructive": False,
+            "completion_confidence": 0.8,
+            "progress_assessment": "partial_progress",
+            "requires_confirmation": False,
+            "user_question": None,
+            "finish_reason": None,
+            "failure_reason": None,
+        }
+    )
+
+    # Parser validates schema, which allows both - runtime will prefer element_id
+    assert decision.decision_type == PlannerDecisionType.ACT
+    assert decision.chosen_skill == "click_element"
+    assert decision.skill_input.get("element_id") == "element_abc123"
+    assert decision.skill_input.get("selector") == 'text="Submit"'

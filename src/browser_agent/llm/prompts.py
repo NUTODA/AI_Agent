@@ -31,12 +31,20 @@ PLANNER_SYSTEM_PROMPT = dedent(
     - Request confirmation before risky or destructive actions.
     - Finish only when the task is sufficiently supported by observed evidence.
 
-    IMPORTANT - Selector usage for click_element and type_text:
-    - ALWAYS use the exact selector values provided in the Current observation's interactive_elements.
-    - Prefer data-testid selectors when available (e.g., '[data-testid="add-burger"]').
-    - Playwright does NOT support jQuery selectors like :contains().
-    - Valid selector formats: CSS selectors, text selectors (text="..."), role selectors.
-    - When multiple elements match, use the most specific selector from the observation.
+    CRITICAL - Element targeting policy for click_element, type_text, select_option, press_key:
+    1. If the target element appears in the Current observation's interactive_elements list:
+       - YOU MUST use the element_id field (e.g., "element_abc123")
+       - Never construct your own selector when a stable element_id is available
+    2. Only use the selector field as a fallback when:
+       - The element is NOT present in the current observation
+       - You need to interact with an element that wasn't captured
+    3. NEVER use generic text selectors (text="...") for repeated controls like:
+       - "Mark Spam" buttons in email lists
+       - "Add to Cart" buttons on product listing pages
+       - "Delete" buttons in table rows
+       These are ambiguous and will click the wrong element.
+    4. NEVER use unsupported jQuery-style selectors like :contains()
+    5. Playwright selector formats: CSS selectors, text="exact text", role=button[name="label"]
 
     Decision types:
     - act: execute exactly one registered skill next.
@@ -146,26 +154,112 @@ def _render_observation(planner_context: PlannerContext) -> str:
         return "- no observation is available yet"
 
     visible_text = observation.visible_text_excerpt[:500] or "none"
-    interactive_labels = ", ".join(
-        element.label for element in observation.interactive_elements[:8]
-    )
-    form_labels = ", ".join(
-        field.label or field.name or field.selector
-        for field in observation.form_fields[:8]
-    )
     lines = [
         f"- page_url: {observation.page_url}",
         f"- page_title: {observation.page_title}",
         f"- summary: {observation.summary}",
         f"- visible_text_excerpt: {visible_text}",
-        f"- interactive_elements: {interactive_labels or 'none'}",
-        f"- form_fields: {form_labels or 'none'}",
     ]
+
+    # Render interactive elements with element_id prominently displayed
+    if observation.interactive_elements:
+        lines.append("- interactive_elements (USE element_id from this list):")
+        for element in observation.interactive_elements[:15]:
+            element_line = _format_interactive_element(element)
+            lines.append(f"  {element_line}")
+    else:
+        lines.append("- interactive_elements: none")
+
+    # Render form fields with field_id
+    if observation.form_fields:
+        lines.append("- form_fields:")
+        for field in observation.form_fields[:10]:
+            field_line = _format_form_field(field)
+            lines.append(f"  {field_line}")
+    else:
+        lines.append("- form_fields: none")
+
     if observation.observation_errors:
         lines.append(
             f"- observation_errors: {', '.join(observation.observation_errors[:4])}"
         )
     return "\n".join(lines)
+
+
+def _format_interactive_element(element) -> str:
+    """Format an interactive element for the planner with element_id first."""
+    parts = [f"[{element.element_id}]"]
+
+    # Tag and role
+    tag_info = element.tag or "element"
+    if element.role and element.role != "other":
+        tag_info = f"{element.tag} ({element.role})"
+    parts.append(tag_info)
+
+    # Text/label content
+    display_text = element.text or element.label or ""
+    if display_text:
+        # Truncate long text
+        if len(display_text) > 40:
+            display_text = display_text[:37] + "..."
+        parts.append(f'"{display_text}"')
+
+    # Stable attributes for reference
+    attrs = []
+    if element.attributes:
+        testid = element.attributes.get("data-testid") or element.attributes.get("testid")
+        if testid:
+            attrs.append(f"testid={testid}")
+        if element.aria_label:
+            attrs.append(f"aria-label={element.aria_label[:30]}")
+        if element.attributes.get("name"):
+            attrs.append(f"name={element.attributes.get('name')}")
+
+    if attrs:
+        parts.append(f"| {' | '.join(attrs)}")
+
+    # State indicators
+    states = []
+    if not element.is_visible:
+        states.append("hidden")
+    if not element.is_enabled:
+        states.append("disabled")
+    if element.is_clickable:
+        states.append("clickable")
+    if element.is_input:
+        states.append("input")
+
+    if states:
+        parts.append(f"[{', '.join(states)}]")
+
+    return " ".join(parts)
+
+
+def _format_form_field(field) -> str:
+    """Format a form field for the planner with field_id first."""
+    parts = [f"[{field.field_id}]"]
+
+    # Field type and label
+    label = field.label or field.name or "unnamed"
+    if len(label) > 30:
+        label = label[:27] + "..."
+    parts.append(f"{field.field_type or 'input'}: \"{label}\"")
+
+    # State indicators
+    states = []
+    if field.required:
+        states.append("required")
+    if field.filled:
+        states.append("filled")
+    if not field.is_visible:
+        states.append("hidden")
+    if not field.is_enabled:
+        states.append("disabled")
+
+    if states:
+        parts.append(f"[{', '.join(states)}]")
+
+    return " ".join(parts)
 
 
 def _render_trace_summary(trace_summary: list[str]) -> str:

@@ -895,6 +895,23 @@ class PlaywrightBrowserEngine:
                 metadata={"target": target},
             )
 
+        # If using raw selector (not element_id), check for ambiguity
+        if not resolution.used_element_reference:
+            is_ambiguous, match_count = self._detect_ambiguous_selector(page, target)
+            if is_ambiguous:
+                return self._result_error(
+                    action="click",
+                    message=f"Selector `{target}` is ambiguous and matches {match_count} elements.",
+                    error_code="ambiguous_target",
+                    error_message=f"The selector matches {match_count} elements. Use element_id for precise targeting.",
+                    duration_ms=self._elapsed_ms(start),
+                    metadata={
+                        "target": target,
+                        "matched_candidates_count": match_count,
+                        "suggestion": "Use element_id from observation for precise targeting",
+                    },
+                )
+
         errors: list[str] = []
         for candidate in resolution.candidates:
             try:
@@ -950,6 +967,23 @@ class PlaywrightBrowserEngine:
                 duration_ms=self._elapsed_ms(start),
                 metadata={"target": target},
             )
+
+        # If using raw selector (not element_id), check for ambiguity
+        if not resolution.used_element_reference:
+            is_ambiguous, match_count = self._detect_ambiguous_selector(page, target)
+            if is_ambiguous:
+                return self._result_error(
+                    action="type_text",
+                    message=f"Selector `{target}` is ambiguous and matches {match_count} elements.",
+                    error_code="ambiguous_target",
+                    error_message=f"The selector matches {match_count} elements. Use element_id for precise targeting.",
+                    duration_ms=self._elapsed_ms(start),
+                    metadata={
+                        "target": target,
+                        "matched_candidates_count": match_count,
+                        "suggestion": "Use element_id from observation for precise targeting",
+                    },
+                )
 
         errors: list[str] = []
         for candidate in resolution.candidates:
@@ -1022,6 +1056,23 @@ class PlaywrightBrowserEngine:
                 duration_ms=self._elapsed_ms(start),
                 metadata={"target": target},
             )
+
+        # If using raw selector (not element_id), check for ambiguity
+        if not resolution.used_element_reference:
+            is_ambiguous, match_count = self._detect_ambiguous_selector(page, target)
+            if is_ambiguous:
+                return self._result_error(
+                    action="select_option",
+                    message=f"Selector `{target}` is ambiguous and matches {match_count} elements.",
+                    error_code="ambiguous_target",
+                    error_message=f"The selector matches {match_count} elements. Use element_id for precise targeting.",
+                    duration_ms=self._elapsed_ms(start),
+                    metadata={
+                        "target": target,
+                        "matched_candidates_count": match_count,
+                        "suggestion": "Use element_id from observation for precise targeting",
+                    },
+                )
 
         errors: list[str] = []
         for candidate in resolution.candidates:
@@ -1169,6 +1220,24 @@ class PlaywrightBrowserEngine:
                         duration_ms=self._elapsed_ms(start),
                         metadata={"key": key, "target": target},
                     )
+
+                # If using raw selector (not element_id), check for ambiguity
+                if not resolution.used_element_reference:
+                    is_ambiguous, match_count = self._detect_ambiguous_selector(page, target)
+                    if is_ambiguous:
+                        return self._result_error(
+                            action="press_key",
+                            message=f"Selector `{target}` is ambiguous and matches {match_count} elements.",
+                            error_code="ambiguous_target",
+                            error_message=f"The selector matches {match_count} elements. Use element_id for precise targeting.",
+                            duration_ms=self._elapsed_ms(start),
+                            metadata={
+                                "key": key,
+                                "target": target,
+                                "matched_candidates_count": match_count,
+                                "suggestion": "Use element_id from observation for precise targeting",
+                            },
+                        )
 
                 errors: list[str] = []
                 for candidate in resolution.candidates:
@@ -1652,3 +1721,20 @@ class PlaywrightBrowserEngine:
 
     def _elapsed_ms(self, start: float) -> int:
         return int((perf_counter() - start) * 1000)
+
+    def _detect_ambiguous_selector(
+        self,
+        page,
+        selector: str,
+    ) -> tuple[bool, int]:
+        """Check if a selector matches multiple elements on the page.
+
+        Returns:
+            Tuple of (is_ambiguous, match_count)
+        """
+        try:
+            locator = page.locator(selector)
+            count = locator.count()
+            return count > 1, count
+        except Exception:
+            return False, 0

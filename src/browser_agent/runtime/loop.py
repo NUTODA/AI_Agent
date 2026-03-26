@@ -14,6 +14,7 @@ from browser_agent.runtime.models import (
     AgentAction,
     AgentObservation,
     FinalReport,
+    InteractiveElement,
     PendingUserQuestion,
     PlannerDecisionType,
     PlannerProgressState,
@@ -90,21 +91,13 @@ class RuntimeLoop:
             )
             return session.complete(report)
 
-        resumed_decision = PlannerDecision(
-            decision_type=PlannerDecisionType.ACT,
-            rationale=approved_action.rationale,
-            chosen_skill=approved_action.tool_name,
-            skill_input=approved_action.parameters,
-            expected_outcome=approved_action.expected_outcome,
-            risk_level=approved_action.risk_level,
-            destructive=approved_action.destructive,
-            completion_confidence=0.5,
-            progress_assessment=PlannerProgressState.PARTIAL_PROGRESS,
+        # Don't reuse the old action/decision - element IDs may be stale.
+        # Instead, let the planner make a fresh decision based on current observation.
+        session.record_history(
+            f"Continuing after confirmation for action {approved_action.action_id}"
         )
         return self._run_loop(
             session,
-            resumed_action=approved_action,
-            resumed_decision=resumed_decision,
             resumed_notes=["Continued after explicit operator confirmation."],
         )
 
@@ -177,6 +170,13 @@ class RuntimeLoop:
                     decision = PlannerDecision.safe_fail(
                         f"Planner raised an unexpected exception: {exc}"
                     )
+
+                # Validate element targeting policy
+                decision = self._validate_element_targeting(
+                    decision,
+                    observation_before,
+                )
+
                 thought = decision.to_agent_thought()
                 session.add_thought(thought)
 
@@ -249,10 +249,16 @@ class RuntimeLoop:
 
             return session.complete(self._max_steps_report(session))
         finally:
-            try:
-                self.browser.stop()
-            except Exception:
-                pass
+            # Don't stop browser if waiting for confirmation or user input
+            # to allow seamless resume via continue_after_confirmation/continue_after_user_answer
+            if session.status not in {
+                RuntimeStatus.WAITING_FOR_CONFIRMATION,
+                RuntimeStatus.WAITING_FOR_USER,
+            }:
+                try:
+                    self.browser.stop()
+                except Exception:
+                    pass
 
     def _handle_ask_user(
         self,
@@ -833,6 +839,135 @@ class RuntimeLoop:
             and previous.parameters == action.parameters
             for previous in recent
         )
+
+    def _validate_element_targeting(
+        self,
+        decision: PlannerDecision,
+        observation: AgentObservation | None,
+    ) -> PlannerDecision:
+        """Validate that element targeting follows the policy.
+
+        Rejects decisions that:
+        1. Use raw selector when element_id is available in observation
+        2. Use ambiguous selectors that match multiple elements
+        """
+        if decision.decision_type not in {
+            PlannerDecisionType.ACT,
+            PlannerDecisionType.REQUEST_CONFIRMATION,
+        }:
+            return decision
+
+        if not decision.chosen_skill:
+            return decision
+
+        if decision.chosen_skill not in {
+            "click_element",
+            "type_text",
+            "select_option",
+            "press_key",
+            "upload_file",
+        }:
+            return decision
+
+        skill_input = decision.skill_input or {}
+        element_id = skill_input.get("element_id")
+        selector = skill_input.get("selector")
+
+        # If element_id is provided, that's correct usage
+        if element_id:
+            return decision
+
+        # No selector provided either - let skill validation handle this
+        if not selector:
+            return decision
+
+        # Using raw selector without element_id - validate against observation
+        if observation:
+            # Check if this is a generic text selector that matches observed elements
+            if self._looks_like_generic_text_selector(selector):
+                for element in observation.interactive_elements:
+                    if self._selector_matches_element(selector, element):
+                        # This selector matches an element that has an element_id
+                        # The planner should have used element_id
+                        return PlannerDecision.safe_fail(
+                            f"Targeting policy violation: raw selector '{selector}' "
+                            f"matches observed element {element.element_id} but element_id was not used. "
+                            f"When an element is in the observation, always use its element_id."
+                        )
+
+            # Check for ambiguity (selector matches multiple elements)
+            matching_count = self._count_matching_observed_elements(selector, observation)
+            if matching_count > 1:
+                return PlannerDecision.safe_fail(
+                    f"Ambiguous target: selector '{selector}' matches {matching_count} elements "
+                    f"in the observation. Use element_id for precise targeting."
+                )
+
+        return decision
+
+    def _looks_like_generic_text_selector(self, selector: str) -> bool:
+        """Check if selector appears to be a generic text-based selector."""
+        import re
+
+        selector_lower = selector.lower().strip()
+
+        # text="..." patterns
+        if re.match(r'^text=["\']', selector_lower):
+            return True
+
+        # role=... patterns without specific name
+        if selector_lower.startswith("role=") and "name=" not in selector_lower:
+            return True
+
+        return False
+
+    def _selector_matches_element(
+        self,
+        selector: str,
+        element: InteractiveElement,
+    ) -> bool:
+        """Check if a text-based selector likely matches an element."""
+        import re
+
+        selector_lower = selector.lower()
+        element_text = (element.text or "").lower()
+        element_label = (element.label or "").lower()
+
+        # Extract text from text="..." pattern
+        match = re.search(r'text=["\'](.+?)["\']', selector, re.IGNORECASE)
+        if match:
+            search_text = match.group(1).lower()
+            return search_text in element_text or search_text in element_label
+
+        # For non-text selectors, check if selector is contained in element identifiers
+        if selector_lower in element_text or selector_lower in element_label:
+            return True
+
+        return False
+
+    def _count_matching_observed_elements(
+        self,
+        selector: str,
+        observation: AgentObservation,
+    ) -> int:
+        """Count how many observed elements match the selector."""
+        import re
+
+        count = 0
+
+        match = re.search(r'text=["\'](.+?)["\']', selector, re.IGNORECASE)
+        if not match:
+            return 0
+
+        search_text = match.group(1).lower()
+
+        for element in observation.interactive_elements:
+            element_text = (element.text or "").lower()
+            element_label = (element.label or "").lower()
+            if search_text in element_text or search_text in element_label:
+                count += 1
+
+        return count
 
     def _history_line(
         self,
