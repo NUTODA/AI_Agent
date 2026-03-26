@@ -13,6 +13,7 @@ from browser_agent.llm.planner import LLMPlanner
 from browser_agent.llm.provider import (
     GoogleGenerativeLanguageProvider,
     OpenAICompatibleProvider,
+    TrackingLLMProvider,
 )
 from browser_agent.runtime.loop import RuntimeLoop
 from browser_agent.runtime.models import FinalReport, RuntimeStatus, UserTask
@@ -52,6 +53,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--capture-screenshots",
         action="store_true",
         help="Capture one screenshot artifact at each observation point.",
+    )
+    parser.add_argument(
+        "--ui",
+        action="store_true",
+        help="Run with the Rich interactive Agent Console (not compatible with --json).",
     )
     return parser
 
@@ -257,6 +263,8 @@ def render_text_report(report: FinalReport, *, session: RuntimeSession | None = 
 def build_planner(
     settings: RuntimeSettings,
     skill_registry,
+    *,
+    session: RuntimeSession | None = None,
 ) -> tuple[LLMPlanner | None, str | None]:
     """Build the configured planner or return a clear configuration error."""
 
@@ -276,12 +284,14 @@ def build_planner(
         return None, "Planner is enabled but `BROWSER_AGENT_PLANNER_MODEL` is missing."
 
     if settings.planner_provider == "openai_compatible":
-        provider = OpenAICompatibleProvider(
-            base_url=settings.planner_base_url,
-            model_name=settings.planner_model,
-            api_key=settings.planner_api_key,
-            timeout_seconds=settings.planner_timeout_seconds,
-            temperature=settings.planner_temperature,
+        provider: OpenAICompatibleProvider | GoogleGenerativeLanguageProvider = (
+            OpenAICompatibleProvider(
+                base_url=settings.planner_base_url,
+                model_name=settings.planner_model,
+                api_key=settings.planner_api_key,
+                timeout_seconds=settings.planner_timeout_seconds,
+                temperature=settings.planner_temperature,
+            )
         )
     else:  # google_compatible
         provider = GoogleGenerativeLanguageProvider(
@@ -292,6 +302,9 @@ def build_planner(
             temperature=settings.planner_temperature,
         )
 
+    if session is not None:
+        provider = TrackingLLMProvider(provider, session.llm_usage)
+
     parser = PlannerResponseParser(skill_registry=skill_registry)
     return LLMPlanner(provider=provider, parser=parser), None
 
@@ -301,6 +314,9 @@ def run_cli(argv: Sequence[str] | None = None) -> FinalReport:
 
     parser = build_parser()
     args = parser.parse_args(list(argv) if argv is not None else None)
+
+    if args.ui and args.json:
+        parser.error("--ui and --json cannot be used together.")
 
     task_text = args.task or input("Task> ").strip()
     settings = RuntimeSettings.from_env()
@@ -317,7 +333,7 @@ def run_cli(argv: Sequence[str] | None = None) -> FinalReport:
     )
     session = RuntimeSession(task=task, settings=settings)
     skill_registry = build_default_registry()
-    planner, planner_error = build_planner(settings, skill_registry)
+    planner, planner_error = build_planner(settings, skill_registry, session=session)
     if planner is None:
         report = FinalReport(
             session_id=session.session_id,
@@ -340,6 +356,23 @@ def run_cli(argv: Sequence[str] | None = None) -> FinalReport:
         return report
 
     browser = build_browser_engine(settings)
+    if args.ui:
+        from browser_agent.ui.console import AgentConsoleApp
+
+        console_app = AgentConsoleApp(session=session, settings=settings)
+        loop = RuntimeLoop(
+            planner=planner,
+            skill_registry=skill_registry,
+            browser=browser,
+            safety_guardrails=SafetyGuardrails(),
+            confirmation_manager=ConfirmationManager(),
+            trace_recorder=TraceRecorder(trace_dir=settings.trace_dir),
+            event_emitter=console_app,
+            planner_display_name=settings.planner_model,
+            planner_provider_kind=settings.planner_provider,
+        )
+        return console_app.run_interactive_loop(loop)
+
     loop = RuntimeLoop(
         planner=planner,
         skill_registry=skill_registry,

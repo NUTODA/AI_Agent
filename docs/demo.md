@@ -48,6 +48,16 @@ python demos/server.py
 
 The server starts on `http://localhost:8765/` by default.
 
+### Optional: Interactive terminal UI
+
+For live step-by-step output, token totals, and Rich confirmation prompts during demos:
+
+```bash
+browser-agent --ui --start-url http://localhost:8765/inbox_demo.html "Your task here"
+```
+
+See **Interactive Agent Console** in the repository `README.md` for panel descriptions. `--ui` is not compatible with `--json`.
+
 ## Demo 1: Inbox Management
 
 ### Page Overview

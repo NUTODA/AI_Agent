@@ -1,0 +1,39 @@
+"""Terminal UI layer for the browser agent (Rich console, events)."""
+
+from browser_agent.ui.events import (
+    AgentRunCompleted,
+    AgentRunFailed,
+    AgentRunStarted,
+    ConfirmationRequested,
+    GuardrailCheck,
+    NoOpEventEmitter,
+    ObservationReady,
+    PlannerDecisionReady,
+    RuntimeEvent,
+    RuntimeEventEmitter,
+    SkillExecutionCompleted,
+    SkillExecutionStarted,
+    StepCompleted,
+    StepStarted,
+    TokenUsageUpdated,
+    UserInputRequested,
+)
+
+__all__ = [
+    "AgentRunCompleted",
+    "AgentRunFailed",
+    "AgentRunStarted",
+    "ConfirmationRequested",
+    "GuardrailCheck",
+    "NoOpEventEmitter",
+    "ObservationReady",
+    "PlannerDecisionReady",
+    "RuntimeEvent",
+    "RuntimeEventEmitter",
+    "SkillExecutionCompleted",
+    "SkillExecutionStarted",
+    "StepCompleted",
+    "StepStarted",
+    "TokenUsageUpdated",
+    "UserInputRequested",
+]

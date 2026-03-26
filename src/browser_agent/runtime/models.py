@@ -257,6 +257,42 @@ class ExecutionTraceItem(BaseModel):
     recorded_at: datetime = Field(default_factory=utc_now)
 
 
+class LLMUsageTotals(BaseModel):
+    """Cumulative LLM usage for one runtime session (UI / metrics)."""
+
+    cumulative_prompt_tokens: int = 0
+    cumulative_completion_tokens: int = 0
+    cumulative_total_tokens: int = 0
+    request_count: int = 0
+    last_prompt_tokens: int | None = None
+    last_completion_tokens: int | None = None
+    last_total_tokens: int | None = None
+    last_latency_ms: float | None = None
+    last_approximate: bool = False
+    last_model_name: str | None = None
+
+    def add_request(
+        self,
+        *,
+        prompt_tokens: int,
+        completion_tokens: int,
+        total_tokens: int,
+        approximate: bool,
+        latency_ms: float | None,
+        model_name: str | None,
+    ) -> None:
+        self.cumulative_prompt_tokens += prompt_tokens
+        self.cumulative_completion_tokens += completion_tokens
+        self.cumulative_total_tokens += total_tokens
+        self.request_count += 1
+        self.last_prompt_tokens = prompt_tokens
+        self.last_completion_tokens = completion_tokens
+        self.last_total_tokens = total_tokens
+        self.last_approximate = approximate
+        self.last_latency_ms = latency_ms
+        self.last_model_name = model_name
+
+
 class FinalReport(BaseModel):
     """A user-facing summary of the runtime outcome."""
 

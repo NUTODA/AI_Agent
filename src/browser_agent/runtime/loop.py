@@ -31,6 +31,25 @@ from browser_agent.safety.confirmations import ConfirmationDecision, Confirmatio
 from browser_agent.safety.guardrails import SafetyGuardrails
 from browser_agent.skills.base import SkillContext, SkillExecutionError
 from browser_agent.skills.registry import SkillRegistry
+from browser_agent.ui.events import (
+    AgentRunCompleted,
+    AgentRunFailed,
+    AgentRunStarted,
+    ConfirmationRequested,
+    GuardrailCheck,
+    NoOpEventEmitter,
+    ObservationReady,
+    PlannerDecisionReady,
+    RuntimeEventEmitter,
+    SkillExecutionCompleted,
+    SkillExecutionStarted,
+    StepCompleted,
+    StepStarted,
+    TokenUsageUpdated,
+    UserInputRequested,
+    utc_now,
+)
+from browser_agent.ui.formatting import format_tool_target, summarize_skill_input, truncate_text
 
 
 class RuntimeLoop:
@@ -46,6 +65,9 @@ class RuntimeLoop:
         confirmation_manager: ConfirmationManager,
         trace_recorder: TraceRecorder,
         progress_detector: ProgressDetector | None = None,
+        event_emitter: RuntimeEventEmitter | None = None,
+        planner_display_name: str | None = None,
+        planner_provider_kind: str | None = None,
     ) -> None:
         self.planner = planner
         self.skill_registry = skill_registry
@@ -55,6 +77,99 @@ class RuntimeLoop:
         self.trace_recorder = trace_recorder
         self.progress_detector = progress_detector or ProgressDetector()
         self.available_skills = describe_skill_registry(skill_registry)
+        self._events: RuntimeEventEmitter = event_emitter or NoOpEventEmitter()
+        self._planner_display_name = planner_display_name
+        self._planner_provider_kind = planner_provider_kind
+
+    def _finish(self, session: RuntimeSession, report: FinalReport) -> FinalReport:
+        result = session.complete(report)
+        if result.status not in {
+            RuntimeStatus.WAITING_FOR_CONFIRMATION,
+            RuntimeStatus.WAITING_FOR_USER,
+        }:
+            self._events.emit(
+                AgentRunCompleted(
+                    timestamp=utc_now(),
+                    status=result.status.value,
+                    summary=result.summary,
+                    step_count=result.step_count,
+                    trace_refs=tuple(result.trace_refs),
+                    artifact_refs=tuple(result.artifact_refs),
+                    final_url=result.final_url,
+                )
+            )
+        return result
+
+    def _emit_token_usage(self, session: RuntimeSession, step_index: int | None) -> None:
+        u = session.llm_usage
+        self._events.emit(
+            TokenUsageUpdated(
+                timestamp=utc_now(),
+                step_number=step_index,
+                prompt_tokens=u.last_prompt_tokens,
+                completion_tokens=u.last_completion_tokens,
+                total_tokens=u.last_total_tokens,
+                cumulative_prompt_tokens=u.cumulative_prompt_tokens,
+                cumulative_completion_tokens=u.cumulative_completion_tokens,
+                cumulative_total_tokens=u.cumulative_total_tokens,
+                request_count=u.request_count,
+                latency_ms=u.last_latency_ms,
+                approximate=u.last_approximate,
+                model_name=u.last_model_name or self._planner_display_name,
+            )
+        )
+
+    def _emit_observation_ready(self, step_index: int, observation: AgentObservation) -> None:
+        self._events.emit(
+            ObservationReady(
+                timestamp=utc_now(),
+                step_number=step_index,
+                page_url=observation.page_url,
+                page_title=observation.page_title,
+                summary=truncate_text(observation.summary, 400),
+                interactive_element_count=len(observation.interactive_elements),
+                warnings=tuple(observation.observation_errors[:8]),
+            )
+        )
+
+    def _emit_planner_decision(self, step_index: int, decision: PlannerDecision) -> None:
+        self._events.emit(
+            PlannerDecisionReady(
+                timestamp=utc_now(),
+                step_number=step_index,
+                decision_type=decision.decision_type.value,
+                rationale_summary=truncate_text(decision.rationale, 320),
+                expected_outcome=(
+                    truncate_text(decision.expected_outcome, 240)
+                    if decision.expected_outcome
+                    else None
+                ),
+                chosen_skill=decision.chosen_skill,
+                skill_input_summary=summarize_skill_input(decision.skill_input or {}),
+            )
+        )
+
+    def _emit_step_completed(
+        self,
+        step_index: int,
+        progress_summary: str | None,
+        report: FinalReport | None,
+    ) -> None:
+        status = (
+            report.status.value
+            if report is not None
+            else RuntimeStatus.RUNNING.value
+        )
+        self._events.emit(
+            StepCompleted(
+                timestamp=utc_now(),
+                step_number=step_index,
+                progress_summary=(
+                    truncate_text(progress_summary, 200) if progress_summary else None
+                ),
+                session_status=status,
+            )
+        )
 
     def run(self, session: RuntimeSession) -> FinalReport:
         """Execute the runtime loop until completion or a controlled stop."""
@@ -89,7 +204,7 @@ class RuntimeLoop:
                 step_count=session.step_count,
                 failure_reason=session.failure_reason,
             )
-            return session.complete(report)
+            return self._finish(session, report)
 
         # Don't reuse the old action/decision - element IDs may be stale.
         # Instead, let the planner make a fresh decision based on current observation.
@@ -125,11 +240,31 @@ class RuntimeLoop:
         try:
             self.browser.start()
         except Exception as exc:
-            return session.complete(self._startup_failure_report(session, exc))
+            self._events.emit(
+                AgentRunFailed(
+                    timestamp=utc_now(),
+                    message="Browser failed to start.",
+                    failure_reason=str(exc),
+                )
+            )
+            return self._finish(session, self._startup_failure_report(session, exc))
+
+        self._events.emit(
+            AgentRunStarted(
+                timestamp=utc_now(),
+                session_id=session.session_id,
+                task_summary=truncate_text(session.task.request, 200),
+                max_steps=session.settings.max_steps,
+                model_name=self._planner_display_name,
+                provider_kind=self._planner_provider_kind,
+            )
+        )
 
         try:
             if resumed_action is not None and resumed_decision is not None:
-                pre_observation = self._observe_current_page(session)
+                self._events.emit(StepStarted(timestamp=utc_now(), step_number=session.step_count))
+                pre_observation = self._observe_current_page(session, step_index=session.step_count)
+                self._emit_observation_ready(session.step_count, pre_observation)
                 resumed_report = self._execute_action_step(
                     session=session,
                     step_index=session.step_count,
@@ -144,9 +279,17 @@ class RuntimeLoop:
 
             while session.step_count < session.settings.max_steps:
                 step_index = session.step_count
+                self._events.emit(StepStarted(timestamp=utc_now(), step_number=step_index))
                 try:
-                    observation_before = self._observe_current_page(session)
+                    observation_before = self._observe_current_page(session, step_index=step_index)
                 except Exception as exc:
+                    self._events.emit(
+                        AgentRunFailed(
+                            timestamp=utc_now(),
+                            message="Observation failed.",
+                            failure_reason=str(exc),
+                        )
+                    )
                     report = FinalReport(
                         session_id=session.session_id,
                         status=RuntimeStatus.FAILED,
@@ -160,7 +303,8 @@ class RuntimeLoop:
                         step_count=session.step_count,
                         failure_reason=str(exc),
                     )
-                    return session.complete(report)
+                    return self._finish(session, report)
+                self._emit_observation_ready(step_index, observation_before)
                 planner_context = session.build_planner_context(
                     available_skills=self.available_skills,
                 )
@@ -179,6 +323,8 @@ class RuntimeLoop:
 
                 thought = decision.to_agent_thought()
                 session.add_thought(thought)
+                self._emit_planner_decision(step_index, decision)
+                self._emit_token_usage(session, step_index)
 
                 if decision.decision_type == PlannerDecisionType.ASK_USER:
                     return self._handle_ask_user(
@@ -222,6 +368,15 @@ class RuntimeLoop:
                     )
 
                 guardrail_decision = self.safety_guardrails.classify_action(action)
+                self._events.emit(
+                    GuardrailCheck(
+                        timestamp=utc_now(),
+                        step_number=step_index,
+                        requires_confirmation=guardrail_decision.requires_confirmation,
+                        reason=truncate_text(guardrail_decision.reason, 240),
+                        matched_signals=tuple(guardrail_decision.matched_signals[:12]),
+                    )
+                )
                 if (
                     decision.decision_type == PlannerDecisionType.REQUEST_CONFIRMATION
                     or guardrail_decision.requires_confirmation
@@ -247,7 +402,7 @@ class RuntimeLoop:
                 if report is not None:
                     return report
 
-            return session.complete(self._max_steps_report(session))
+            return self._finish(session, self._max_steps_report(session))
         finally:
             # Don't stop browser if waiting for confirmation or user input
             # to allow seamless resume via continue_after_confirmation/continue_after_user_answer
@@ -306,8 +461,16 @@ class RuntimeLoop:
         session.record_history(
             f"step {step_index}: planner asked the user a blocking question."
         )
+        self._events.emit(
+            UserInputRequested(
+                timestamp=utc_now(),
+                step_number=step_index,
+                question=question.question,
+            )
+        )
         session.increment_step()
-        return session.complete(report)
+        self._emit_step_completed(step_index, progress_outcome.summary, report)
+        return self._finish(session, report)
 
     def _handle_planner_failure(
         self,
@@ -354,7 +517,8 @@ class RuntimeLoop:
         session.register_progress(progress_outcome)
         session.increment_step()
         session.failure_reason = decision.failure_reason
-        return session.complete(report)
+        self._emit_step_completed(step_index, progress_outcome.summary, report)
+        return self._finish(session, report)
 
     def _handle_repeated_action_stop(
         self,
@@ -408,7 +572,8 @@ class RuntimeLoop:
         session.register_progress(progress_outcome)
         session.increment_step()
         session.failure_reason = report.failure_reason
-        return session.complete(report)
+        self._emit_step_completed(step_index, progress_outcome.summary, report)
+        return self._finish(session, report)
 
     def _pause_for_confirmation(
         self,
@@ -483,8 +648,20 @@ class RuntimeLoop:
         session.record_history(
             f"step {step_index}: paused for confirmation before `{action.tool_name}`."
         )
+        self._events.emit(
+            ConfirmationRequested(
+                timestamp=utc_now(),
+                step_number=step_index,
+                action_name=request.action_name,
+                reason=truncate_text(request.reason, 320),
+                prompt=request.prompt,
+                consequences=tuple(request.consequences[:12]),
+                risk_level=request.risk_level.value,
+            )
+        )
         session.increment_step()
-        return session.complete(report)
+        self._emit_step_completed(step_index, progress_outcome.summary, report)
+        return self._finish(session, report)
 
     def _execute_action_step(
         self,
@@ -507,14 +684,17 @@ class RuntimeLoop:
         )
         session.add_tool_call(tool_call)
 
-        tool_result = self._execute_skill(action, tool_call, session)
+        tool_result = self._execute_skill(
+            action, tool_call, session, step_index=step_index
+        )
         session.add_tool_result(tool_result)
 
         observation_after = self._extract_observation(tool_result)
         if observation_after is not None:
             session.add_observation(observation_after)
         elif tool_result.status == ToolExecutionStatus.SUCCESS and action.tool_name != "finish_task":
-            observation_after = self._observe_current_page(session)
+            observation_after = self._observe_current_page(session, step_index=step_index)
+            self._emit_observation_ready(step_index, observation_after)
 
         if action.tool_name == "finish_task" and tool_result.status == ToolExecutionStatus.SUCCESS:
             progress_outcome = ProgressOutcome(
@@ -608,27 +788,83 @@ class RuntimeLoop:
             )
         )
         session.increment_step()
+        self._emit_step_completed(step_index, progress_outcome.summary, report)
 
         if report is not None:
-            return session.complete(report)
+            return self._finish(session, report)
         return None
 
-    def _observe_current_page(self, session: RuntimeSession) -> AgentObservation:
+    def _observe_current_page(
+        self, session: RuntimeSession, *, step_index: int
+    ) -> AgentObservation:
         skill = self.skill_registry.get("observe_page")
         payload = skill.validate_input({})
+        self._events.emit(
+            SkillExecutionStarted(
+                timestamp=utc_now(),
+                step_number=step_index,
+                skill_name="observe_page",
+                target_summary=None,
+            )
+        )
+        step_started = perf_counter()
         try:
             output_payload = skill.execute(self._context(session), payload)
         except SkillExecutionError as exc:
+            duration = self._elapsed_ms(step_started)
+            self._events.emit(
+                SkillExecutionCompleted(
+                    timestamp=utc_now(),
+                    step_number=step_index,
+                    skill_name="observe_page",
+                    status=ToolExecutionStatus.ERROR.value,
+                    message=truncate_text(exc.message, 200),
+                    duration_ms=duration,
+                )
+            )
             raise RuntimeError(exc.message) from exc
         except Exception as exc:
+            duration = self._elapsed_ms(step_started)
+            self._events.emit(
+                SkillExecutionCompleted(
+                    timestamp=utc_now(),
+                    step_number=step_index,
+                    skill_name="observe_page",
+                    status=ToolExecutionStatus.ERROR.value,
+                    message="Failed to observe the current page.",
+                    duration_ms=duration,
+                )
+            )
             raise RuntimeError("Failed to observe the current page.") from exc
 
         output_data = output_payload.model_dump(mode="json")
         observation_payload = output_data.get("observation")
         if not isinstance(observation_payload, dict):
+            duration = self._elapsed_ms(step_started)
+            self._events.emit(
+                SkillExecutionCompleted(
+                    timestamp=utc_now(),
+                    step_number=step_index,
+                    skill_name="observe_page",
+                    status=ToolExecutionStatus.ERROR.value,
+                    message="Invalid observation payload.",
+                    duration_ms=duration,
+                )
+            )
             raise RuntimeError("observe_page did not return an observation payload.")
         observation = AgentObservation.model_validate(observation_payload)
         session.add_observation(observation)
+        duration = self._elapsed_ms(step_started)
+        self._events.emit(
+            SkillExecutionCompleted(
+                timestamp=utc_now(),
+                step_number=step_index,
+                skill_name="observe_page",
+                status=ToolExecutionStatus.SUCCESS.value,
+                message="Page observed.",
+                duration_ms=duration,
+            )
+        )
         return observation
 
     def _execute_skill(
@@ -636,14 +872,25 @@ class RuntimeLoop:
         action: AgentAction,
         tool_call: ToolCall,
         session: RuntimeSession,
+        *,
+        step_index: int,
     ) -> ToolResult:
         step_started = perf_counter()
+        target = format_tool_target(action.tool_name, action.parameters)
+        self._events.emit(
+            SkillExecutionStarted(
+                timestamp=utc_now(),
+                step_number=step_index,
+                skill_name=action.tool_name,
+                target_summary=target,
+            )
+        )
         try:
             skill = self.skill_registry.get(action.tool_name)
             payload = skill.validate_input(action.parameters)
             output_payload = skill.execute(self._context(session), payload)
             output_data = output_payload.model_dump(mode="json")
-            return ToolResult(
+            result = ToolResult(
                 call_id=tool_call.call_id,
                 skill_name=tool_call.skill_name,
                 status=ToolExecutionStatus.SUCCESS,
@@ -652,8 +899,19 @@ class RuntimeLoop:
                 artifacts=self._extract_artifacts(output_data),
                 duration_ms=self._elapsed_ms(step_started),
             )
+            self._events.emit(
+                SkillExecutionCompleted(
+                    timestamp=utc_now(),
+                    step_number=step_index,
+                    skill_name=action.tool_name,
+                    status=result.status.value,
+                    message=truncate_text(result.message, 240),
+                    duration_ms=result.duration_ms,
+                )
+            )
+            return result
         except SkillExecutionError as exc:
-            return ToolResult(
+            result = ToolResult(
                 call_id=tool_call.call_id,
                 skill_name=tool_call.skill_name,
                 status=ToolExecutionStatus.ERROR,
@@ -664,8 +922,19 @@ class RuntimeLoop:
                 error_message=exc.message,
                 duration_ms=self._elapsed_ms(step_started),
             )
+            self._events.emit(
+                SkillExecutionCompleted(
+                    timestamp=utc_now(),
+                    step_number=step_index,
+                    skill_name=action.tool_name,
+                    status=result.status.value,
+                    message=truncate_text(result.message, 240),
+                    duration_ms=result.duration_ms,
+                )
+            )
+            return result
         except Exception as exc:
-            return ToolResult(
+            result = ToolResult(
                 call_id=tool_call.call_id,
                 skill_name=tool_call.skill_name,
                 status=ToolExecutionStatus.ERROR,
@@ -674,6 +943,17 @@ class RuntimeLoop:
                 error_message=str(exc),
                 duration_ms=self._elapsed_ms(step_started),
             )
+            self._events.emit(
+                SkillExecutionCompleted(
+                    timestamp=utc_now(),
+                    step_number=step_index,
+                    skill_name=action.tool_name,
+                    status=result.status.value,
+                    message=truncate_text(result.message, 240),
+                    duration_ms=result.duration_ms,
+                )
+            )
+            return result
 
     def _context(self, session: RuntimeSession) -> SkillContext:
         return SkillContext(

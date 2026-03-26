@@ -24,6 +24,7 @@ The repository now includes a real typed planner layer, a real multi-step runtim
 The project is split into small modules with explicit boundaries:
 
 - `cli`: terminal-style entrypoint and operator UX.
+- `ui`: optional Rich Agent Console and runtime event types for live terminal UI.
 - `runtime`: session state, trace handling, loop orchestration, final reporting.
 - `llm`: planner contracts, prompts, and structured parser boundaries.
 - `browser`: browser adapter interfaces and page-state models.
@@ -48,7 +49,7 @@ flowchart TD
 
 ```text
 docs/                  Architecture, rules, and roadmap
-src/browser_agent/     Runtime, browser, safety, skills, and CLI packages
+src/browser_agent/     Runtime, browser, safety, skills, CLI, and UI (Rich console)
 tests/                 Smoke and contract tests for the foundation
 ```
 
@@ -74,6 +75,24 @@ You can also pass flags:
 browser-agent --headed --start-url https://example.com --max-steps 12 "Inspect the page"
 browser-agent --capture-screenshots --start-url https://example.com --json "Observe the current page"
 ```
+
+### Interactive Agent Console
+
+For a demo-ready **terminal operator console** (Rich live layout), use `--ui`:
+
+```bash
+browser-agent --ui --headed --start-url https://example.com "Inspect the page and summarize"
+```
+
+What you get:
+
+- **Top bar:** task line, status (`running` / `waiting` / terminal), current step vs `max_steps`, high-level phase (observe / plan / act / confirm), configured model and provider.
+- **Left panel:** current URL and title, cumulative prompt/completion/total tokens (marked **(estimated)** when the provider did not return usage), LLM request count, best-effort USD estimate when the model is in the built-in price table (otherwise `N/A`), and elapsed time.
+- **Center panel:** rolling timeline of the last ~10 planner steps as structured cards (decision type, **rationale** and **expected_outcome** only — no raw chain-of-thought), skill name, target summary, result, progress note.
+- **Right panel:** latest observation summary, interactive element count, observation warnings, and last decision summary.
+- **Bottom panel:** confirmation block (`Y` / `N`) or agent question + answer prompt; uses the same `continue_after_confirmation` / `continue_after_user_answer` flow as the plain CLI.
+
+`--ui` cannot be combined with `--json`.
 
 If the `playwright` shell command is unavailable in your environment, run the browser install step through Python instead:
 

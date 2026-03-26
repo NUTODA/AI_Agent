@@ -14,6 +14,7 @@ from browser_agent.runtime.models import (
     ConfirmationRequest,
     ExecutionTraceItem,
     FinalReport,
+    LLMUsageTotals,
     PendingUserQuestion,
     ProgressOutcome,
     RuntimeStatus,
@@ -62,6 +63,7 @@ class RuntimeSession:
     completion_reason: str | None = None
     failure_reason: str | None = None
     final_report: FinalReport | None = None
+    llm_usage: LLMUsageTotals = field(default_factory=LLMUsageTotals)
 
     def start(self) -> None:
         """Move the session into the running state."""

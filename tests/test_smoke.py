@@ -54,7 +54,7 @@ def test_cli_runs_multistep_runtime_with_configured_planner(
     monkeypatch.setenv("BROWSER_AGENT_ARTIFACT_DIR", str(tmp_path / "artifacts"))
     monkeypatch.setattr(
         "browser_agent.cli.app.build_planner",
-        lambda settings, skill_registry: (
+        lambda settings, skill_registry, session=None: (
             QueuePlanner(
                 [
                     PlannerDecision(
