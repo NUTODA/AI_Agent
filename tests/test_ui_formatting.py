@@ -20,7 +20,7 @@ def test_format_step_card_text_includes_key_sections() -> None:
     text = format_step_card_plain(step)
     assert "[Step 5] ACT" in text
     assert "See cart" in text
-    assert "click_element" in text
+    assert "Click Element" in text
     assert "element_id=el_41" in text
-    assert "success" in text
+    assert "Success" in text
     assert "navigated" in text

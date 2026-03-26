@@ -29,6 +29,16 @@ from browser_agent.ui.events import (
     TokenUsageUpdated,
     UserInputRequested,
 )
+from browser_agent.ui.formatting import (
+    FinalSummaryInput,
+    build_final_summary_lines,
+    compute_timeline_phase_label,
+    generate_human_summary,
+    humanize_result_status,
+    humanize_skill_name,
+    infer_error_block,
+    truncate_text,
+)
 from browser_agent.ui.models import AgentConsoleState, TimelineStepView
 from browser_agent.ui.pricing import estimate_cost_usd
 from browser_agent.ui.render import build_final_summary_panel, build_layout
@@ -43,6 +53,18 @@ def _is_terminal_status(status: RuntimeStatus) -> bool:
         RuntimeStatus.STOPPED,
         RuntimeStatus.FAILED,
     }
+
+
+def _set_summary(state: AgentConsoleState, text: str) -> None:
+    t = text.strip()
+    if t and t != state.human_summary:
+        state.human_summary = t
+
+
+def _clear_error(state: AgentConsoleState) -> None:
+    state.error_title = None
+    state.error_explanation = None
+    state.error_hint = None
 
 
 class AgentConsoleApp:
@@ -62,11 +84,14 @@ class AgentConsoleApp:
         self._pending_target: str | None = None
         self._confirmation_pending = False
         self._user_input_pending = False
+        self._step_had_non_observe_skill = False
 
     def emit(self, event: RuntimeEvent) -> None:
         if isinstance(event, AgentRunStarted):
+            _clear_error(self.state)
+            self._step_had_non_observe_skill = False
             self.state.status = "running"
-            self.state.phase = "observe"
+            self.state.display_phase = "OBSERVE"
             self.state.max_steps_config = event.max_steps
             self.state.step_display = f"0 / {event.max_steps}"
             if event.model_name:
@@ -74,47 +99,138 @@ class AgentConsoleApp:
             if event.provider_kind:
                 self.state.provider_kind = event.provider_kind
             self.state.run_started_at = event.timestamp
+            _set_summary(
+                self.state,
+                generate_human_summary(event_kind="run_started"),
+            )
         elif isinstance(event, StepStarted):
-            self.state.phase = "observe"
+            _clear_error(self.state)
+            self._step_had_non_observe_skill = False
+            self.state.display_phase = "OBSERVE"
             self.state.step_display = f"{event.step_number} / {self.state.max_steps_config or self.session.settings.max_steps}"
             self.state.status = "running"
         elif isinstance(event, ObservationReady):
-            self.state.phase = "plan"
+            self.state.display_phase = "OBSERVE"
             self.state.current_url = event.page_url
             self.state.page_title = event.page_title
             self.state.observation_summary = event.summary
             self.state.interactive_element_count = event.interactive_element_count
             self.state.observation_warnings = list(event.warnings)
+            _set_summary(
+                self.state,
+                generate_human_summary(
+                    event_kind="observation_ready",
+                    observation_snippet=truncate_text(event.summary, 80),
+                ),
+            )
         elif isinstance(event, PlannerDecisionReady):
-            self.state.phase = "act"
+            self.state.display_phase = "PLAN"
             self.state.last_decision_type = event.decision_type
             self.state.last_rationale = event.rationale_summary
             self.state.last_expected_outcome = event.expected_outcome
             self._pending_skill = event.chosen_skill
             self._pending_target = event.skill_input_summary
+            dt = (event.decision_type or "").lower()
+            if dt == "fail":
+                _clear_error(self.state)
+                self.state.error_title = "Planner failure"
+                self.state.error_explanation = truncate_text(event.rationale_summary, 240)
+                self.state.error_hint = "Check planner output and task constraints; see trace for details."
+            _set_summary(
+                self.state,
+                generate_human_summary(
+                    event_kind="planner_decision",
+                    decision_type=event.decision_type,
+                    rationale=event.rationale_summary,
+                    expected_outcome=event.expected_outcome,
+                    skill_name=event.chosen_skill,
+                ),
+            )
         elif isinstance(event, GuardrailCheck):
-            self.state.phase = "confirm" if event.requires_confirmation else "guardrail"
+            self.state.display_phase = (
+                "GUARDRAIL" if not event.requires_confirmation else "GUARDRAIL"
+            )
+            if event.requires_confirmation:
+                _set_summary(
+                    self.state,
+                    generate_human_summary(
+                        event_kind="guardrail",
+                        requires_confirmation=True,
+                        guardrail_reason=event.reason,
+                    ),
+                )
+            else:
+                _set_summary(
+                    self.state,
+                    generate_human_summary(
+                        event_kind="guardrail",
+                        requires_confirmation=False,
+                        guardrail_reason=event.reason,
+                    ),
+                )
         elif isinstance(event, SkillExecutionStarted):
-            self.state.phase = "act"
+            self.state.display_phase = "ACT"
+            if event.skill_name and event.skill_name != "observe_page":
+                self._step_had_non_observe_skill = True
             self._pending_skill = event.skill_name
             self._pending_target = event.target_summary
+            _set_summary(
+                self.state,
+                generate_human_summary(
+                    event_kind="skill_started",
+                    skill_name=event.skill_name,
+                    target_summary=event.target_summary,
+                ),
+            )
         elif isinstance(event, SkillExecutionCompleted):
             self._last_skill_status = event.status
+            err = infer_error_block(status=event.status, message=event.message)
+            if err:
+                title, explanation, hint = err
+                self.state.error_title = title
+                self.state.error_explanation = explanation
+                self.state.error_hint = hint
+            elif event.status.lower() == "success":
+                _clear_error(self.state)
+            _set_summary(
+                self.state,
+                generate_human_summary(
+                    event_kind="skill_completed",
+                    skill_name=event.skill_name,
+                    skill_status=event.status,
+                    skill_message=event.message,
+                ),
+            )
         elif isinstance(event, ConfirmationRequested):
             self._confirmation_pending = True
-            self.state.phase = "confirm"
+            self.state.display_phase = "WAITING_CONFIRMATION"
             self.state.bottom_mode = "confirm"
             self.state.status = "waiting"
             self.state.confirm_action = event.action_name
             self.state.confirm_reason = event.reason
             self.state.confirm_prompt = event.prompt
             self.state.confirm_consequences = list(event.consequences)
+            self.state.error_title = "Confirmation required"
+            self.state.error_explanation = truncate_text(event.reason or event.prompt, 220)
+            self.state.error_hint = "Approve (Y) only if you accept the listed consequences."
+            _set_summary(
+                self.state,
+                generate_human_summary(
+                    event_kind="confirmation",
+                    confirm_action=event.action_name,
+                ),
+            )
         elif isinstance(event, UserInputRequested):
             self._user_input_pending = True
-            self.state.phase = "wait_input"
+            self.state.display_phase = "WAITING_USER"
             self.state.bottom_mode = "input"
             self.state.status = "waiting"
             self.state.input_question = event.question
+            _clear_error(self.state)
+            _set_summary(
+                self.state,
+                generate_human_summary(event_kind="user_input", question=event.question),
+            )
         elif isinstance(event, StepCompleted):
             self.state.step_display = (
                 f"{self.session.step_count} / {self.session.settings.max_steps}"
@@ -134,7 +250,7 @@ class AgentConsoleApp:
                 RuntimeStatus.WAITING_FOR_CONFIRMATION.value,
                 RuntimeStatus.WAITING_FOR_USER.value,
             }:
-                self.state.phase = "observe"
+                self.state.display_phase = "OBSERVE"
 
             if self._confirmation_pending:
                 result = "waiting_for_confirmation"
@@ -151,27 +267,44 @@ class AgentConsoleApp:
                 skill = self._pending_skill or "—"
                 target = self._pending_target or "—"
 
-            phase_label = (self.state.last_decision_type or "step").upper()
+            phase_label = compute_timeline_phase_label(
+                session_status=event.session_status,
+                step_had_non_observe_skill=self._step_had_non_observe_skill,
+            )
+            skill_display = humanize_skill_name(skill if skill != "—" else None)
+            result_display = humanize_result_status(result)
             self.state.timeline.append(
                 TimelineStepView(
                     step_number=event.step_number,
                     phase_label=phase_label,
-                    rationale_summary=self.state.last_rationale or "—",
+                    rationale_summary=truncate_text(self.state.last_rationale or "—", 200),
                     expected_outcome=self.state.last_expected_outcome,
-                    skill_name=skill,
-                    target_summary=target,
+                    skill_name=skill if skill != "—" else None,
+                    target_summary=target if target != "—" else None,
                     result_status=result,
                     progress_note=event.progress_summary,
+                    skill_display=skill_display,
+                    result_display=result_display,
                 )
             )
             if len(self.state.timeline) > self.state.max_timeline_steps:
                 self.state.timeline = self.state.timeline[-self.state.max_timeline_steps :]
+            _set_summary(
+                self.state,
+                generate_human_summary(
+                    event_kind="step_completed",
+                    progress_summary=event.progress_summary,
+                ),
+            )
         elif isinstance(event, TokenUsageUpdated):
             self.state.prompt_tokens_total = event.cumulative_prompt_tokens
             self.state.completion_tokens_total = event.cumulative_completion_tokens
             self.state.total_tokens_total = event.cumulative_total_tokens
             self.state.llm_request_count = event.request_count
             self.state.tokens_approximate = event.approximate
+            if event.latency_ms is not None:
+                self.state.llm_latency_sum_ms += float(event.latency_ms)
+                self.state.llm_latency_count += 1
             model = event.model_name or self.state.model_name
             cost = estimate_cost_usd(
                 model,
@@ -181,18 +314,61 @@ class AgentConsoleApp:
             self.state.estimated_cost_usd = cost
         elif isinstance(event, AgentRunCompleted):
             self.state.status = event.status
-            self.state.phase = "done"
+            st = event.status.lower()
+            if st == "failed":
+                self.state.display_phase = "FAILED"
+            else:
+                self.state.display_phase = "FINISHED"
             self.state.bottom_mode = "idle"
             self._build_final_summary(event)
+            _set_summary(self.state, truncate_text(event.summary, 160))
         elif isinstance(event, AgentRunFailed):
             self.state.status = "failed"
-            self.state.phase = "done"
+            self.state.display_phase = "FAILED"
+            self.state.error_title = "Run error"
+            self.state.error_explanation = truncate_text(event.message, 220)
+            self.state.error_hint = truncate_text(event.failure_reason or "", 160) or None
+            if self.state.error_hint == self.state.error_explanation:
+                self.state.error_hint = "See trace artifacts for full detail."
 
         self._refresh()
 
     def _refresh(self) -> None:
         if self._live is not None:
             self._live.update(build_layout(self.state), refresh=True)
+
+    def _latency_avg_display(self) -> str:
+        if self.state.llm_latency_count <= 0:
+            return "—"
+        avg = self.state.llm_latency_sum_ms / self.state.llm_latency_count
+        approx = " (estimated)" if self.state.tokens_approximate else ""
+        return f"{avg:.0f} ms{approx}"
+
+    def _key_actions_from_session(self, max_items: int = 5) -> list[str]:
+        fr = self.session.final_report
+        if fr and fr.actions_taken:
+            return [str(a) for a in fr.actions_taken[:max_items]]
+        lines: list[str] = []
+        for item in self.session.trace_items[-12:]:
+            name = item.action_name or (
+                item.planner_decision_type.value if item.planner_decision_type else None
+            )
+            if not name:
+                continue
+            rat = (item.rationale_summary or "").strip()
+            piece = humanize_skill_name(name)
+            if rat:
+                piece = f"{piece} — {truncate_text(rat, 72)}"
+            lines.append(piece)
+        out: list[str] = []
+        seen: set[str] = set()
+        for L in reversed(lines):
+            if L not in seen:
+                seen.add(L)
+                out.append(L)
+            if len(out) >= max_items:
+                break
+        return list(reversed(out))
 
     def _build_final_summary(self, event: AgentRunCompleted) -> None:
         urls: list[str] = []
@@ -206,32 +382,57 @@ class AgentConsoleApp:
             delta = datetime.now(timezone.utc) - self.state.run_started_at
             sec = int(delta.total_seconds())
             dur = f"{sec // 60:02d}:{sec % 60:02d}"
-        approx = " (estimated)" if self.state.tokens_approximate else ""
-        cost_line = (
-            f"${self.state.estimated_cost_usd:.4f}{approx}"
-            if self.state.estimated_cost_usd is not None
-            else f"N/A{approx}"
+
+        fr = self.session.final_report
+        failure_reason = getattr(fr, "failure_reason", None) if fr else None
+        completed = bool(getattr(fr, "completed", False)) if fr else False
+        status_enum = getattr(fr, "status", None) if fr else None
+        if status_enum == RuntimeStatus.COMPLETED and completed:
+            outcome = "Completed"
+        elif status_enum == RuntimeStatus.FAILED:
+            outcome = "Failed"
+        else:
+            outcome = "Partial"
+
+        self.state.outcome_label = outcome
+        st = event.status.lower()
+        if st == "failed":
+            self.state.final_run_headline = "RUN FAILED"
+        elif st == "completed":
+            self.state.final_run_headline = "RUN COMPLETED"
+        else:
+            self.state.final_run_headline = "RUN STOPPED"
+
+        key_actions = self._key_actions_from_session(5)
+        self.state.key_actions = key_actions
+
+        data = FinalSummaryInput(
+            task=self.state.task,
+            status=event.status,
+            outcome_label=outcome,
+            step_count=event.step_count,
+            llm_request_count=self.state.llm_request_count,
+            prompt_tokens=self.state.prompt_tokens_total,
+            completion_tokens=self.state.completion_tokens_total,
+            total_tokens=self.state.total_tokens_total,
+            tokens_approximate=self.state.tokens_approximate,
+            estimated_cost_usd=self.state.estimated_cost_usd,
+            latency_avg_ms=self._latency_avg_display(),
+            duration_mmss=dur,
+            summary=event.summary,
+            visited_urls=urls,
+            trace_refs=event.trace_refs,
+            artifact_refs=event.artifact_refs,
+            key_actions=key_actions,
+            failure_reason=failure_reason,
         )
-        lines = [
-            f"Task:\n  {self.state.task[:200]}",
-            f"Steps:\n  {event.step_count}",
-            f"LLM calls:\n  {self.state.llm_request_count}",
-            f"Tokens used:\n  {self.state.total_tokens_total:,}{approx}",
-            f"Duration:\n  {dur}",
-            f"Est. cost:\n  {cost_line}",
-            f"Outcome:\n  {event.status} — {event.summary[:300]}",
-            "Visited URLs:",
-            *[f"  - {u}" for u in urls[:12]] or ["  —"],
-            "Artifacts:",
-            *[f"  - {a}" for a in event.artifact_refs[:12]] or ["  —"],
-            "Trace:",
-            *[f"  - {t}" for t in event.trace_refs[:6]] or ["  —"],
-        ]
-        self.state.final_summary_lines = lines
+        self.state.final_summary_lines = build_final_summary_lines(data)
         self.state.show_final_summary = True
 
     def run_interactive_loop(self, loop: RuntimeLoop) -> FinalReport:
         """Run runtime with Live UI and Rich prompts for pause states."""
+        self.console.print("[bold cyan]Starting Agent Console…[/]")
+        self.console.print("[dim]Live layout updates below. Traces and artifacts paths appear in the final summary.[/]\n")
         layout = build_layout(self.state)
         with Live(
             layout,
@@ -289,5 +490,14 @@ class AgentConsoleApp:
         if self.state.show_final_summary and self.state.final_summary_lines:
             self.console.print()
             self.console.print(build_final_summary_panel(self.state))
+        if report.status == RuntimeStatus.COMPLETED:
+            self.console.print("\n[bold green]Run completed successfully.[/]")
+        elif report.status == RuntimeStatus.FAILED:
+            self.console.print("\n[bold red]Run ended with failures — see summary and trace artifacts.[/]")
+        else:
+            self.console.print("\n[bold yellow]Run stopped — see summary for outcome and artifact paths.[/]")
+        self.console.print(
+            "[dim]Artifacts (e.g. traces/*.md, traces/*.jsonl) are under your configured trace directory.[/]\n"
+        )
 
         return report

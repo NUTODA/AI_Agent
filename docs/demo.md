@@ -56,7 +56,7 @@ For live step-by-step output, token totals, and Rich confirmation prompts during
 browser-agent --ui --start-url http://localhost:8765/inbox_demo.html "Your task here"
 ```
 
-See **Interactive Agent Console** in the repository `README.md` for panel descriptions. `--ui` is not compatible with `--json`.
+See **Agent Console UI (`--ui`)** in the repository `README.md` for panel descriptions, phases, and a sample final summary. `--ui` is not compatible with `--json`.
 
 ## Demo 1: Inbox Management
 

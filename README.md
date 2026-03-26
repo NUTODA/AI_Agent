@@ -76,7 +76,7 @@ browser-agent --headed --start-url https://example.com --max-steps 12 "Inspect t
 browser-agent --capture-screenshots --start-url https://example.com --json "Observe the current page"
 ```
 
-### Interactive Agent Console
+### Agent Console UI (`--ui`)
 
 For a demo-ready **terminal operator console** (Rich live layout), use `--ui`:
 
@@ -84,13 +84,51 @@ For a demo-ready **terminal operator console** (Rich live layout), use `--ui`:
 browser-agent --ui --headed --start-url https://example.com "Inspect the page and summarize"
 ```
 
-What you get:
+On startup you’ll see a short banner (`Starting Agent Console…`), then a live layout. When the run finishes, a **Run summary** panel is printed (suitable for screenshots), plus a one-line outcome and a reminder where trace artifacts live.
 
-- **Top bar:** task line, status (`running` / `waiting` / terminal), current step vs `max_steps`, high-level phase (observe / plan / act / confirm), configured model and provider.
-- **Left panel:** current URL and title, cumulative prompt/completion/total tokens (marked **(estimated)** when the provider did not return usage), LLM request count, best-effort USD estimate when the model is in the built-in price table (otherwise `N/A`), and elapsed time.
-- **Center panel:** rolling timeline of the last ~10 planner steps as structured cards (decision type, **rationale** and **expected_outcome** only — no raw chain-of-thought), skill name, target summary, result, progress note.
-- **Right panel:** latest observation summary, interactive element count, observation warnings, and last decision summary.
-- **Bottom panel:** confirmation block (`Y` / `N`) or agent question + answer prompt; uses the same `continue_after_confirmation` / `continue_after_user_answer` flow as the plain CLI.
+**Phases (top bar, color-coded):** `OBSERVE`, `PLAN`, `GUARDRAIL`, `ACT`, `WAITING_CONFIRMATION`, `WAITING_USER`, and terminal `FINISHED` / `FAILED`. A short **human-readable** line explains what the agent is doing (from planner rationale / expected outcome / current skill — never raw chain-of-thought).
+
+**Panels:**
+
+| Area | Contents |
+|------|-----------|
+| **Top** | Task, status, step counter, model/provider, **phase chip**, narrative line |
+| **Left — Status & tokens** | URL/title; model; LLM request count; prompt / completion / total tokens; estimated cost; average LLM latency; duration. Token/cost lines show **(estimated)** when usage is approximate or missing from the provider. |
+| **Center — Issue** (when needed) | Red **ERROR** block for tool failures, ambiguous targets, blocked actions, planner failures, or confirmation context |
+| **Center — Steps** | Last ~10 steps: step number, **phase**, short reason, humanized skill name (e.g. `Click Element`), target, expected outcome, result, progress |
+| **Right — Current state** | Observation snippet, interactive element count, warnings, last decision |
+| **Bottom** | Confirmation (`Y`/`N`) or blocking user question + answer prompt (same resume flow as non-UI CLI) |
+
+**Example final summary (illustrative):**
+
+```text
+╞════════════ Run summary ════════════╡
+RUN COMPLETED
+
+Task: Inspect the page and summarize
+Outcome: Completed
+Steps: 4
+LLM calls: 5
+Tokens (total): 12,450
+  Prompt: 11,000
+  Completion: 1,450
+Est. cost: $0.0234
+Avg LLM latency: 890 ms
+Duration: 02:14
+
+Summary: …
+
+Key actions:
+  • Navigate — …
+  • Click Element — …
+
+Visited URLs:
+  • https://example.com/…
+
+Artifacts (traces & files):
+  • traces/session_….md
+  • traces/session_….jsonl
+```
 
 `--ui` cannot be combined with `--json`.
 

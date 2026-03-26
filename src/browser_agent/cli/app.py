@@ -29,7 +29,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser = argparse.ArgumentParser(
         prog="browser-agent",
-        description="Run the browser agent multi-step runtime.",
+        description=(
+            "Run the browser agent multi-step runtime. "
+            "Use --ui for the Rich Agent Console (live phases, steps, tokens, confirmations)."
+        ),
     )
     parser.add_argument("task", nargs="?", help="Natural-language task to run.")
     parser.add_argument("--start-url", help="Optional starting URL for the session.")
@@ -57,7 +60,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--ui",
         action="store_true",
-        help="Run with the Rich interactive Agent Console (not compatible with --json).",
+        help=(
+            "Rich Agent Console: live layout with phases (OBSERVE/PLAN/ACT/…), "
+            "human-readable status, step cards, token/cost panel, and inline Y/N confirmations. "
+            "Incompatible with --json."
+        ),
     )
     return parser
 
