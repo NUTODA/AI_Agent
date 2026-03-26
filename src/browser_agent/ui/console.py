@@ -123,6 +123,7 @@ def _print_pending_confirmation(console: Console, req: ConfirmationRequest) -> N
     """Show confirmation details on the main terminal after Live stops."""
     console.print()
     console.print(Rule("[bold red]Confirmation required[/]", style="red"))
+    console.print(f"[bold]Request ID:[/] {escape(req.request_id)}")
     console.print(f"[bold]Action:[/] {escape(req.action_name)}")
     if req.reason:
         console.print(f"[bold]Reason:[/] {escape(req.reason)}")

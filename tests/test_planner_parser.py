@@ -34,6 +34,83 @@ def build_parser() -> PlannerResponseParser:
     return PlannerResponseParser(skill_registry=build_default_registry())
 
 
+def test_parser_normalizes_pipe_separated_decision_type_from_prompt_confusion() -> None:
+    """Local models sometimes paste the prompt's 'a | b | c' hint as a single string."""
+    parser = build_parser()
+
+    decision = parser.parse(
+        {
+            "decision_type": "act | ask_user | request_confirmation | finish | fail",
+            "rationale": "Start with navigation.",
+            "chosen_skill": "navigate",
+            "skill_input": {"url": "https://example.com", "wait_for": "load"},
+            "expected_outcome": "Page loads.",
+            "risk_level": "low",
+            "destructive": False,
+            "completion_confidence": 0.5,
+            "progress_assessment": "unknown",
+            "requires_confirmation": False,
+            "user_question": None,
+            "finish_reason": None,
+            "failure_reason": None,
+        }
+    )
+
+    assert decision.decision_type == PlannerDecisionType.ACT
+
+
+def test_parser_fills_missing_expected_outcome_for_act() -> None:
+    """Models sometimes omit expected_outcome despite the contract; recover before validation."""
+    parser = build_parser()
+
+    decision = parser.parse(
+        {
+            "decision_type": "act",
+            "rationale": "Open the menu to add items.",
+            "chosen_skill": "click_element",
+            "skill_input": {"element_id": "element_1"},
+            "risk_level": "low",
+            "destructive": False,
+            "completion_confidence": 0.5,
+            "progress_assessment": "partial_progress",
+            "requires_confirmation": False,
+            "user_question": None,
+            "finish_reason": None,
+            "failure_reason": None,
+        }
+    )
+
+    assert decision.decision_type == PlannerDecisionType.ACT
+    assert decision.expected_outcome
+    assert "menu" in decision.expected_outcome.lower()
+
+
+def test_parser_normalizes_common_decision_synonyms() -> None:
+    parser = build_parser()
+
+    decision = parser.parse(
+        {
+            "decision_type": "action",
+            "rationale": "Go to URL.",
+            "chosen_skill": "navigate",
+            "skill_input": {"url": "https://example.com", "wait_for": "load"},
+            "expected_outcome": "Loaded.",
+            "risk_level": "LOW",
+            "destructive": False,
+            "completion_confidence": 0.5,
+            "progress_assessment": "PARTIAL_PROGRESS",
+            "requires_confirmation": False,
+            "user_question": None,
+            "finish_reason": None,
+            "failure_reason": None,
+        }
+    )
+
+    assert decision.decision_type == PlannerDecisionType.ACT
+    assert decision.risk_level.value == "low"
+    assert decision.progress_assessment == PlannerProgressState.PARTIAL_PROGRESS
+
+
 def test_parser_accepts_valid_structured_action_json() -> None:
     parser = build_parser()
 
@@ -264,3 +341,126 @@ def test_parser_prefers_element_id_when_both_provided() -> None:
     assert decision.chosen_skill == "click_element"
     assert decision.skill_input.get("element_id") == "element_abc123"
     assert decision.skill_input.get("selector") == 'text="Submit"'
+
+
+def test_parser_unwraps_nested_decision_key() -> None:
+    """Some APIs nest the contract under `decision` or similar."""
+
+    parser = build_parser()
+    raw = """
+    {
+      "decision": {
+        "decision_type": "act",
+        "rationale": "Navigate first.",
+        "chosen_skill": "navigate",
+        "skill_input": {"url": "https://example.com", "wait_for": "load"},
+        "expected_outcome": "Page loads.",
+        "risk_level": "low",
+        "destructive": false,
+        "completion_confidence": 0.5,
+        "progress_assessment": "unknown",
+        "requires_confirmation": false,
+        "user_question": null,
+        "finish_reason": null,
+        "failure_reason": null
+      }
+    }
+    """
+    decision = parser.parse(raw)
+    assert decision.decision_type == PlannerDecisionType.ACT
+    assert decision.chosen_skill == "navigate"
+
+
+def test_parser_accepts_type_and_reason_aliases() -> None:
+    parser = build_parser()
+    decision = parser.parse(
+        {
+            "type": "act",
+            "reason": "Go.",
+            "chosen_skill": "navigate",
+            "skill_input": {"url": "https://example.com", "wait_for": "load"},
+            "expected_outcome": "Loaded.",
+            "risk_level": "low",
+            "destructive": False,
+            "completion_confidence": 0.5,
+            "progress_assessment": "unknown",
+            "requires_confirmation": False,
+            "user_question": None,
+            "finish_reason": None,
+            "failure_reason": None,
+        }
+    )
+    assert decision.decision_type == PlannerDecisionType.ACT
+    assert decision.rationale == "Go."
+
+
+def test_parser_tries_later_json_object_when_first_invalid() -> None:
+    """If the model emits a junk object then the real decision, use the valid one."""
+
+    parser = build_parser()
+    raw = """
+    {"invalid": true}
+    {
+      "decision_type": "act",
+      "rationale": "Second object is valid.",
+      "chosen_skill": "navigate",
+      "skill_input": {"url": "https://example.com", "wait_for": "load"},
+      "expected_outcome": "Loaded.",
+      "risk_level": "low",
+      "destructive": false,
+      "completion_confidence": 0.5,
+      "progress_assessment": "unknown",
+      "requires_confirmation": false,
+      "user_question": null,
+      "finish_reason": null,
+      "failure_reason": null
+    }
+    """
+    decision = parser.parse(raw)
+    assert decision.decision_type == PlannerDecisionType.ACT
+    assert "Second object" in decision.rationale
+
+
+def test_parser_handles_missing_decision_type_with_extended_aliases() -> None:
+    """Parser should handle missing decision_type by trying extended alias list."""
+    parser = build_parser()
+
+    # Test with "action" alias (commonly used by some models)
+    decision = parser.parse(
+        {
+            "action": "act",
+            "rationale": "Navigate to page.",
+            "chosen_skill": "navigate",
+            "skill_input": {"url": "https://example.com"},
+            "expected_outcome": "Page loads.",
+        }
+    )
+    assert decision.decision_type == PlannerDecisionType.ACT
+
+    # Test with "decision" alias - must include all required fields for finish type
+    decision2 = parser.parse(
+        {
+            "decision": "finish",
+            "rationale": "Task complete.",
+            "finish_reason": "Done successfully.",
+            "completion_confidence": 0.95,
+            "progress_assessment": "substantial_progress",
+        }
+    )
+    assert decision2.decision_type == PlannerDecisionType.FINISH
+
+
+def test_parser_returns_safe_fail_when_decision_type_completely_missing() -> None:
+    """Parser should return safe_fail when decision_type is missing and no aliases match."""
+    parser = build_parser()
+
+    decision = parser.parse(
+        {
+            "rationale": "Missing decision type entirely.",
+            "chosen_skill": "navigate",
+            "skill_input": {"url": "https://example.com"},
+            "expected_outcome": "Page loads.",
+        }
+    )
+    assert decision.decision_type == PlannerDecisionType.FAIL
+    assert "decision_type" in (decision.failure_reason or "")

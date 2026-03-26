@@ -46,24 +46,24 @@ PLANNER_SYSTEM_PROMPT = dedent(
     4. NEVER use unsupported jQuery-style selectors like :contains()
     5. Playwright selector formats: CSS selectors, text="exact text", role=button[name="label"]
 
-    Decision types:
+    Decision types (decision_type must be EXACTLY one word from this list):
     - act: execute exactly one registered skill next.
     - ask_user: pause and ask the operator a concrete blocking question.
     - request_confirmation: pause and request confirmation for a specific risky skill action.
     - finish: stop because the task is complete with evidence.
     - fail: stop because the task cannot continue safely or honestly.
 
-    Required JSON shape:
+    Required JSON shape (example values — do not paste alternatives into one string):
     {
-      "decision_type": "act | ask_user | request_confirmation | finish | fail",
+      "decision_type": "act",
       "rationale": "short reasoning summary",
       "chosen_skill": "registered skill name or null",
       "skill_input": {},
-      "expected_outcome": "what should happen after the skill runs or null",
-      "risk_level": "low | medium | high | critical",
+      "expected_outcome": "non-empty: what observable change you expect after this skill (required for act and request_confirmation)",
+      "risk_level": "low",
       "destructive": false,
       "completion_confidence": 0.0,
-      "progress_assessment": "unknown | no_progress | partial_progress | substantial_progress",
+      "progress_assessment": "partial_progress",
       "requires_confirmation": false,
       "user_question": null,
       "finish_reason": null,

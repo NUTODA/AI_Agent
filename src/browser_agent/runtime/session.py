@@ -6,7 +6,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from browser_agent.config import RuntimeSettings
-from browser_agent.llm.planner import AvailableSkill, PlannerContext, PlannerSessionState
+from browser_agent.llm.planner import (
+    AvailableSkill,
+    PlannerContext,
+    PlannerDecision,
+    PlannerSessionState,
+)
 from browser_agent.runtime.models import (
     AgentAction,
     AgentObservation,
@@ -57,6 +62,7 @@ class RuntimeSession:
     trace_items: list[ExecutionTraceItem] = field(default_factory=list)
     pending_confirmation: ConfirmationRequest | None = None
     pending_action: AgentAction | None = None
+    pending_planner_decision: PlannerDecision | None = None
     pending_user_question: PendingUserQuestion | None = None
     user_responses: list[UserResponse] = field(default_factory=list)
     execution_history_summary: list[str] = field(default_factory=list)
@@ -123,11 +129,13 @@ class RuntimeSession:
         request: ConfirmationRequest | None,
         *,
         action: AgentAction | None = None,
+        decision: PlannerDecision | None = None,
     ) -> None:
         """Set or clear a pending confirmation request."""
 
         self.pending_confirmation = request
         self.pending_action = action if request is not None else None
+        self.pending_planner_decision = decision if request is not None else None
         if request is not None:
             self.pending_user_question = None
             self.status = RuntimeStatus.WAITING_FOR_CONFIRMATION
@@ -144,6 +152,7 @@ class RuntimeSession:
         if question is not None:
             self.pending_confirmation = None
             self.pending_action = None
+            self.pending_planner_decision = None
             self.status = RuntimeStatus.WAITING_FOR_USER
         elif self.status == RuntimeStatus.WAITING_FOR_USER:
             self.status = RuntimeStatus.RUNNING
@@ -151,8 +160,8 @@ class RuntimeSession:
     def continue_after_confirmation(
         self,
         decision: ConfirmationDecision,
-    ) -> AgentAction | None:
-        """Apply a confirmation response and return the approved action if any."""
+    ) -> tuple[AgentAction, PlannerDecision] | None:
+        """Apply a confirmation response and return the approved action and planner decision."""
 
         if self.pending_confirmation is None or self.pending_action is None:
             raise ValueError("There is no pending confirmation to resolve.")
@@ -160,17 +169,21 @@ class RuntimeSession:
             raise ValueError("Confirmation decision does not match the pending request.")
 
         action = self.pending_action
+        planner_decision = self.pending_planner_decision
         status_label = "approved" if decision.approved else "rejected"
         self.record_history(
             f"Confirmation `{self.pending_confirmation.action_name}` was {status_label}."
         )
         self.pending_confirmation = None
         self.pending_action = None
+        self.pending_planner_decision = None
         self.final_report = None
 
         if decision.approved:
+            if planner_decision is None:
+                raise ValueError("There is no pending planner decision to resolve.")
             self.status = RuntimeStatus.RUNNING
-            return action
+            return (action, planner_decision)
 
         self.status = RuntimeStatus.STOPPED
         self.failure_reason = (
@@ -214,6 +227,7 @@ class RuntimeSession:
         }:
             self.pending_confirmation = None
             self.pending_action = None
+            self.pending_planner_decision = None
             self.pending_user_question = None
         return report
 

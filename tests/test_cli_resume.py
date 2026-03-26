@@ -414,7 +414,7 @@ class TestRunCliInteractive:
         mock_loop.continue_after_user_answer.assert_called_once()
         mock_loop.continue_after_confirmation.assert_called_once()
 
-    def test_json_mode_returns_pending_report(self) -> None:
+    def test_json_mode_returns_pending_report(self, capsys) -> None:
         """In JSON mode, should return pending report without prompting."""
         mock_loop = MagicMock()
         mock_session = MagicMock()
@@ -439,3 +439,6 @@ class TestRunCliInteractive:
         # Should return the pending report without interaction
         assert report.status == RuntimeStatus.WAITING_FOR_CONFIRMATION
         mock_loop.continue_after_confirmation.assert_not_called()
+        err = capsys.readouterr().err
+        assert "--json" in err
+        assert "browser-agent" in err

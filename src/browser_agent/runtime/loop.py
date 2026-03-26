@@ -24,6 +24,7 @@ from browser_agent.runtime.models import (
     ToolExecutionStatus,
     ToolResult,
 )
+from browser_agent.runtime.element_remap import remap_stale_element_references
 from browser_agent.runtime.progress import ProgressDetector
 from browser_agent.runtime.session import RuntimeSession
 from browser_agent.runtime.trace import TraceRecorder
@@ -187,8 +188,8 @@ class RuntimeLoop:
     ) -> FinalReport:
         """Resume execution after the operator answered a confirmation request."""
 
-        approved_action = session.continue_after_confirmation(decision)
-        if approved_action is None:
+        approved = session.continue_after_confirmation(decision)
+        if approved is None:
             report = FinalReport(
                 session_id=session.session_id,
                 status=RuntimeStatus.STOPPED,
@@ -206,14 +207,17 @@ class RuntimeLoop:
             )
             return self._finish(session, report)
 
-        # Don't reuse the old action/decision - element IDs may be stale.
-        # Instead, let the planner make a fresh decision based on current observation.
+        approved_action, approved_planner_decision = approved
         session.record_history(
             f"Continuing after confirmation for action {approved_action.action_id}"
         )
         return self._run_loop(
             session,
-            resumed_notes=["Continued after explicit operator confirmation."],
+            resumed_action=approved_action,
+            resumed_decision=approved_planner_decision,
+            resumed_notes=[
+                "Continued after explicit operator confirmation; executing approved step once."
+            ],
         )
 
     def continue_after_user_answer(
@@ -265,6 +269,21 @@ class RuntimeLoop:
                 self._events.emit(StepStarted(timestamp=utc_now(), step_number=session.step_count))
                 pre_observation = self._observe_current_page(session, step_index=session.step_count)
                 self._emit_observation_ready(session.step_count, pre_observation)
+                prior_observations = list(session.observations[:-1])
+                params_before = dict(resumed_action.parameters)
+                resumed_action = remap_stale_element_references(
+                    resumed_action,
+                    pre_observation,
+                    prior_observations,
+                )
+                if resumed_action.parameters != params_before:
+                    session.record_history(
+                        "Adjusted targeting after confirmation: element_id or selector "
+                        "was remapped to the fresh observation."
+                    )
+                resumed_decision = resumed_decision.model_copy(
+                    update={"skill_input": dict(resumed_action.parameters)}
+                )
                 resumed_report = self._execute_action_step(
                     session=session,
                     step_index=session.step_count,
@@ -599,7 +618,7 @@ class RuntimeLoop:
             reason=reason or decision.rationale,
             consequences=consequences,
         )
-        session.set_pending_confirmation(request, action=action)
+        session.set_pending_confirmation(request, action=action, decision=decision)
         tool_result = ToolResult(
             call_id=tool_call.call_id,
             skill_name=tool_call.skill_name,
@@ -618,11 +637,18 @@ class RuntimeLoop:
         report = FinalReport(
             session_id=session.session_id,
             status=RuntimeStatus.WAITING_FOR_CONFIRMATION,
-            summary=f"Waiting for confirmation before `{action.tool_name}` can run.",
+            summary=(
+                f"Waiting for confirmation before `{action.tool_name}` can run "
+                f"(request_id={request.request_id})."
+            ),
             completed=False,
             actions_taken=self._actions_taken(session),
             open_questions=[request.prompt],
-            next_steps=["Approve or reject the pending confirmation request."],
+            next_steps=[
+                "Approve or reject the pending confirmation request in an interactive terminal.",
+                "If you used --json, re-run without it or use --ui for inline Y/N prompts.",
+                f"Request ID: {request.request_id}",
+            ],
             trace_refs=self._trace_refs(session),
             artifact_refs=self._artifact_refs(session),
             final_url=self._final_url(session),

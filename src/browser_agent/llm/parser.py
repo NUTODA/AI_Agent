@@ -8,8 +8,174 @@ from typing import Any, Mapping
 from pydantic import ValidationError
 
 from browser_agent.llm.planner import PlannerDecision
-from browser_agent.runtime.models import PlannerDecisionType
+from browser_agent.runtime.models import PlannerDecisionType, PlannerProgressState, RiskLevel
 from browser_agent.skills.registry import SkillRegistry
+
+_VALID_DECISION_TYPES = frozenset(m.value for m in PlannerDecisionType)
+
+# Small models often emit synonyms or pasted prompt fragments; map before Pydantic.
+_DECISION_TYPE_SYNONYMS: dict[str, str] = {
+    "action": "act",
+    "execute": "act",
+    "tool": "act",
+    "ask": "ask_user",
+    "question": "ask_user",
+    "user_question": "ask_user",
+    "confirmation": "request_confirmation",
+    "confirm": "request_confirmation",
+    "complete": "finish",
+    "completed": "finish",
+    "done": "finish",
+    "success": "finish",
+    "error": "fail",
+    "abort": "fail",
+    "stop": "fail",
+}
+
+
+def _normalize_decision_type(raw: Any) -> Any:
+    if raw is None or not isinstance(raw, str):
+        return raw
+    s = raw.strip().lower()
+    if not s:
+        return raw
+    if s in _VALID_DECISION_TYPES:
+        return s
+    if "|" in s:
+        for part in s.split("|"):
+            token = part.strip().lower()
+            if token in _VALID_DECISION_TYPES:
+                return token
+            if token in _DECISION_TYPE_SYNONYMS:
+                return _DECISION_TYPE_SYNONYMS[token]
+    if s in _DECISION_TYPE_SYNONYMS:
+        return _DECISION_TYPE_SYNONYMS[s]
+    return raw
+
+
+def _normalize_enum_field(
+    raw: Any,
+    *,
+    valid: frozenset[str],
+    synonyms: dict[str, str] | None = None,
+) -> Any:
+    if raw is None or not isinstance(raw, str):
+        return raw
+    s = raw.strip().lower().replace(" ", "_").replace("-", "_")
+    if s in valid:
+        return s
+    if synonyms and s in synonyms:
+        return synonyms[s]
+    return raw
+
+
+_ACTING_DECISION_TYPES = frozenset(
+    {
+        PlannerDecisionType.ACT.value,
+        PlannerDecisionType.REQUEST_CONFIRMATION.value,
+    }
+)
+
+
+def _coerce_expected_outcome_for_acting(payload: dict[str, Any]) -> None:
+    """Fill missing `expected_outcome` when the model omits it for acting decisions."""
+
+    if payload.get("decision_type") not in _ACTING_DECISION_TYPES:
+        return
+    raw = payload.get("expected_outcome")
+    if raw is not None and str(raw).strip():
+        return
+    rationale = payload.get("rationale")
+    if isinstance(rationale, str) and rationale.strip():
+        payload["expected_outcome"] = rationale.strip()[:500]
+        return
+    skill = payload.get("chosen_skill")
+    if isinstance(skill, str) and skill.strip():
+        payload["expected_outcome"] = (
+            f"The `{skill.strip()}` step completes and the observable page state updates."
+        )
+        return
+    payload["expected_outcome"] = (
+        "The next action executes and the observable page state updates."
+    )
+
+
+def _coerce_planner_payload_dict(payload: dict[str, Any]) -> dict[str, Any]:
+    out = dict(payload)
+    if "decision_type" in out:
+        out["decision_type"] = _normalize_decision_type(out["decision_type"])
+    if "risk_level" in out:
+        out["risk_level"] = _normalize_enum_field(
+            out["risk_level"],
+            valid=frozenset(m.value for m in RiskLevel),
+        )
+    if "progress_assessment" in out:
+        out["progress_assessment"] = _normalize_enum_field(
+            out["progress_assessment"],
+            valid=frozenset(m.value for m in PlannerProgressState),
+        )
+    _coerce_expected_outcome_for_acting(out)
+    return out
+
+
+# Models often nest the contract under one key or use alternate field names.
+_NESTED_WRAPPER_KEYS: tuple[str, ...] = (
+    "decision",
+    "planner_decision",
+    "next_step",
+    "output",
+    "result",
+    "response",
+    "plan",
+    "payload",
+    "data",
+)
+
+
+def _unwrap_nested_planner_dict(d: dict[str, Any]) -> dict[str, Any]:
+    """Merge nested `{ decision: { ... } }`-style payloads into a flat planner dict."""
+
+    merged = dict(d)
+    for key in _NESTED_WRAPPER_KEYS:
+        inner = merged.get(key)
+        # Only unwrap if the key contains a dict (actual nested wrapper)
+        # If it contains a string (e.g., alias for decision_type), keep it
+        if isinstance(inner, dict):
+            merged.pop(key, None)
+            merged = {**inner, **merged}
+    return merged
+
+
+def _apply_field_aliases(d: dict[str, Any]) -> dict[str, Any]:
+    """Map common alternate keys before Pydantic validation."""
+
+    out = dict(d)
+    # Handle decision_type - check both missing key and None value
+    if out.get("decision_type") is None:
+        # Extended list of common alternate keys for decision_type
+        for alt in ("type", "step_type", "kind", "action_type", "decision", "action"):
+            if out.get(alt) is not None:
+                out["decision_type"] = out[alt]
+                break
+    rationale_missing = (
+        "rationale" not in out
+        or out.get("rationale") is None
+        or (isinstance(out.get("rationale"), str) and not str(out["rationale"]).strip())
+    )
+    if rationale_missing:
+        for alt in ("reason", "reasoning", "explanation", "summary", "thought"):
+            if out.get(alt) is not None and str(out[alt]).strip():
+                out["rationale"] = str(out[alt])
+                break
+    return out
+
+
+def _prepare_planner_dict(raw: dict[str, Any]) -> dict[str, Any]:
+    """Unwrap, alias, then apply enum/decision_type coercion."""
+
+    return _coerce_planner_payload_dict(
+        _apply_field_aliases(_unwrap_nested_planner_dict(raw))
+    )
 
 
 class PlannerResponseParser:
@@ -22,35 +188,49 @@ class PlannerResponseParser:
         """Parse a raw payload into a validated `PlannerDecision`."""
 
         try:
-            normalized_payload = self._normalize_payload(payload)
+            candidates = self._normalize_payload_candidates(payload)
         except ValueError as exc:
             return PlannerDecision.safe_fail(str(exc))
 
-        try:
-            decision = PlannerDecision.model_validate(normalized_payload)
-        except ValidationError as exc:
+        last_validation: ValidationError | None = None
+        last_candidate: dict[str, Any] | None = None
+        for normalized_payload in candidates:
+            last_candidate = normalized_payload
+            try:
+                decision = PlannerDecision.model_validate(normalized_payload)
+                return self._validate_skill_contracts(decision)
+            except ValidationError as exc:
+                last_validation = exc
+                continue
+
+        if last_validation is not None:
+            # Include the actual payload content for debugging
+            preview = str(payload)[:500] if isinstance(payload, str) else str(last_candidate)[:500]
             return PlannerDecision.safe_fail(
                 f"Planner response did not match the decision schema: "
-                f"{self._format_validation_error(exc)}"
+                f"{self._format_validation_error(last_validation)}. "
+                f"Response preview: {preview}"
             )
+        return PlannerDecision.safe_fail(
+            "Planner returned no JSON object that matched the decision schema."
+        )
 
-        return self._validate_skill_contracts(decision)
+    def _normalize_payload_candidates(
+        self, payload: str | Mapping[str, Any]
+    ) -> list[dict[str, Any]]:
+        """Return one or more prepared dicts to try (nested unwrap + aliases + coercion)."""
 
-    def _normalize_payload(self, payload: str | Mapping[str, Any]) -> dict[str, Any]:
         if isinstance(payload, Mapping):
-            return dict(payload)
+            return [_prepare_planner_dict(dict(payload))]
+
         if not isinstance(payload, str) or not payload.strip():
             raise ValueError("Planner returned an empty response instead of JSON.")
 
-        json_text = self._extract_json_object(payload)
-        try:
-            raw_payload = json.loads(json_text)
-        except json.JSONDecodeError as exc:
-            raise ValueError("Planner returned malformed JSON.") from exc
+        raw_dicts = self._extract_json_dict_candidates(payload)
+        if not raw_dicts:
+            raise ValueError("Planner response did not contain a JSON object.")
 
-        if not isinstance(raw_payload, dict):
-            raise ValueError("Planner JSON payload must be an object.")
-        return raw_payload
+        return [_prepare_planner_dict(d) for d in raw_dicts]
 
     def _validate_skill_contracts(self, decision: PlannerDecision) -> PlannerDecision:
         if decision.decision_type in {
@@ -101,14 +281,42 @@ class PlannerResponseParser:
             )
         return decision
 
-    def _extract_json_object(self, payload: str) -> str:
+    def _extract_json_dict_candidates(self, payload: str) -> list[dict[str, Any]]:
+        """Parse all top-level JSON objects from the assistant text (handles preambles / multiple blobs)."""
+
         stripped = payload.strip()
         if stripped.startswith("```"):
             stripped = self._strip_code_fence(stripped)
 
-        start_index = stripped.find("{")
-        if start_index < 0:
-            raise ValueError("Planner response did not contain a JSON object.")
+        try:
+            parsed = json.loads(stripped)
+            if isinstance(parsed, dict):
+                return [parsed]
+            if isinstance(parsed, list):
+                return [x for x in parsed if isinstance(x, dict)]
+        except json.JSONDecodeError:
+            pass
+
+        out: list[dict[str, Any]] = []
+        start = 0
+        while True:
+            pos = stripped.find("{", start)
+            if pos < 0:
+                break
+            try:
+                json_text = self._extract_balanced_json_object(stripped, pos)
+                parsed = json.loads(json_text)
+                if isinstance(parsed, dict):
+                    out.append(parsed)
+                elif isinstance(parsed, list):
+                    out.extend([x for x in parsed if isinstance(x, dict)])
+            except (json.JSONDecodeError, ValueError):
+                pass
+            start = pos + 1
+        return out
+
+    def _extract_balanced_json_object(self, stripped: str, start_index: int) -> str:
+        """Return the balanced `{...}` substring starting at start_index."""
 
         depth = 0
         in_string = False

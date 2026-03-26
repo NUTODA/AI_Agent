@@ -263,8 +263,11 @@ def test_runtime_loop_transitions_to_waiting_for_confirmation_and_can_resume(
     paused_report = loop.run(session)
 
     assert paused_report.status == RuntimeStatus.WAITING_FOR_CONFIRMATION
+    assert "request_id=" in paused_report.summary
     assert session.pending_confirmation is not None
     assert session.pending_action is not None
+    assert session.pending_planner_decision is not None
+    assert session.pending_planner_decision.chosen_skill == "click_element"
     assert session.tool_results[0].status == ToolExecutionStatus.WAITING_FOR_CONFIRMATION
 
     resumed_report = loop.continue_after_confirmation(

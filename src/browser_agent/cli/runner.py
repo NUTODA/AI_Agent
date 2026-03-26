@@ -426,6 +426,8 @@ def build_planner(
                 model_name=settings.planner_model,
                 api_key=settings.planner_api_key,
                 timeout_seconds=settings.planner_timeout_seconds,
+                max_retries=settings.planner_retries,
+                retry_backoff_seconds=settings.planner_retry_backoff_seconds,
                 temperature=settings.planner_temperature,
             )
         )
@@ -435,6 +437,8 @@ def build_planner(
             model_name=settings.planner_model,
             api_key=settings.planner_api_key,
             timeout_seconds=settings.planner_timeout_seconds,
+            max_retries=settings.planner_retries,
+            retry_backoff_seconds=settings.planner_retry_backoff_seconds,
             temperature=settings.planner_temperature,
         )
 
@@ -462,6 +466,7 @@ def prompt_for_confirmation(report: FinalReport) -> ConfirmationDecision | None:
     print("\n" + "=" * 60)
     print("CONFIRMATION REQUIRED")
     print("=" * 60)
+    print(f"Request ID: {request.request_id}")
     print(f"Action: {request.action_name}")
     print(f"Reason: {request.reason}")
     print(f"Risk Level: {request.risk_level.value}")
@@ -530,6 +535,11 @@ def run_cli_interactive(
         if report.status == RuntimeStatus.WAITING_FOR_CONFIRMATION:
             if args_json:
                 # In JSON mode, we can't interact, so return the pending report
+                print(
+                    "[browser-agent] --json disables interactive approval prompts. "
+                    "Re-run without --json or use `browser-agent run --ui` to approve or reject.",
+                    file=sys.stderr,
+                )
                 print(json.dumps(report.model_dump(mode="json"), indent=2))
                 return report
 
@@ -548,6 +558,11 @@ def run_cli_interactive(
         elif report.status == RuntimeStatus.WAITING_FOR_USER:
             if args_json:
                 # In JSON mode, we can't interact, so return the pending report
+                print(
+                    "[browser-agent] --json disables interactive user-input prompts. "
+                    "Re-run without --json or use `browser-agent run --ui`.",
+                    file=sys.stderr,
+                )
                 print(json.dumps(report.model_dump(mode="json"), indent=2))
                 return report
 

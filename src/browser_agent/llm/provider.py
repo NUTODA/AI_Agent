@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import socket
+import time
 from time import perf_counter
 from typing import Any, Literal, Protocol
 from urllib import error, parse, request
@@ -151,6 +153,75 @@ class LLMProviderError(RuntimeError):
     """Raised when the configured provider cannot return a usable response."""
 
 
+def _is_transient_transport_failure(exc: BaseException) -> bool:
+    """True for timeouts and common flaky network conditions worth retrying."""
+
+    if isinstance(exc, (socket.timeout, TimeoutError, BrokenPipeError, ConnectionResetError)):
+        return True
+    msg = str(exc).lower()
+    if "timed out" in msg or "timeout" in msg:
+        return True
+    if isinstance(exc, error.URLError):
+        reason = exc.reason
+        if isinstance(reason, BaseException):
+            return _is_transient_transport_failure(reason)
+        if isinstance(reason, str) and any(
+            token in reason.lower() for token in ("timed out", "timeout", "temporarily", "reset")
+        ):
+            return True
+    return False
+
+
+def _format_openai_transport_error(
+    exc: BaseException,
+    *,
+    timeout_seconds: float,
+    attempt: int,
+    max_attempts: int,
+) -> str:
+    """Human-readable failure for planner HTTP transport (OpenAI-compatible)."""
+
+    msg = str(exc)
+    if "timed out" in msg.lower() or isinstance(exc, socket.timeout):
+        return (
+            f"Planner HTTP read timed out after {timeout_seconds}s "
+            f"(attempt {attempt}/{max_attempts}). "
+            "Increase BROWSER_AGENT_PLANNER_TIMEOUT_SECONDS or retry."
+        )
+    if isinstance(exc, error.HTTPError):
+        return f"Planner provider returned HTTP {exc.code} (attempt {attempt}/{max_attempts})."
+    if isinstance(exc, error.URLError):
+        return (
+            f"Planner provider is unavailable: {exc.reason} "
+            f"(attempt {attempt}/{max_attempts})."
+        )
+    return f"Planner provider request failed: {msg} (attempt {attempt}/{max_attempts})."
+
+
+def _format_gemini_transport_error(
+    exc: BaseException,
+    *,
+    timeout_seconds: float,
+    attempt: int,
+    max_attempts: int,
+) -> str:
+    msg = str(exc)
+    if "timed out" in msg.lower() or isinstance(exc, socket.timeout):
+        return (
+            f"Planner HTTP read timed out after {timeout_seconds}s "
+            f"(attempt {attempt}/{max_attempts}). "
+            "Increase BROWSER_AGENT_PLANNER_TIMEOUT_SECONDS or retry."
+        )
+    if isinstance(exc, error.HTTPError):
+        return f"Planner provider returned HTTP {exc.code} (attempt {attempt}/{max_attempts})."
+    if isinstance(exc, error.URLError):
+        return (
+            f"Planner provider is unavailable: {exc.reason} "
+            f"(attempt {attempt}/{max_attempts})."
+        )
+    return f"Planner provider request failed: {msg} (attempt {attempt}/{max_attempts})."
+
+
 class LLMProvider(Protocol):
     """Transport interface used by the planner layer."""
 
@@ -183,13 +254,17 @@ class OpenAICompatibleProvider:
         base_url: str,
         model_name: str,
         api_key: str | None = None,
-        timeout_seconds: float = 30.0,
+        timeout_seconds: float = 90.0,
+        max_retries: int = 2,
+        retry_backoff_seconds: float = 0.75,
         temperature: float = 0.0,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model_name = model_name
         self.api_key = api_key
         self.timeout_seconds = timeout_seconds
+        self.max_retries = max(0, int(max_retries))
+        self.retry_backoff_seconds = retry_backoff_seconds
         self.temperature = temperature
 
     @property
@@ -225,20 +300,45 @@ class OpenAICompatibleProvider:
             method="POST",
         )
 
-        try:
-            with request.urlopen(http_request, timeout=self.timeout_seconds) as response:
-                raw_text = response.read().decode("utf-8")
-        except error.HTTPError as exc:
-            details = exc.read().decode("utf-8", errors="replace")
-            raise LLMProviderError(
-                f"Planner provider returned HTTP {exc.code}: {details}"
-            ) from exc
-        except error.URLError as exc:
-            raise LLMProviderError(
-                f"Planner provider is unavailable: {exc.reason}"
-            ) from exc
-        except Exception as exc:
-            raise LLMProviderError(f"Planner provider request failed: {exc}") from exc
+        max_attempts = 1 + self.max_retries
+        raw_text: str | None = None
+        for attempt_index in range(max_attempts):
+            attempt_no = attempt_index + 1
+            try:
+                with request.urlopen(http_request, timeout=self.timeout_seconds) as response:
+                    raw_text = response.read().decode("utf-8")
+                break
+            except error.HTTPError as exc:
+                details = exc.read().decode("utf-8", errors="replace")
+                raise LLMProviderError(
+                    f"Planner provider returned HTTP {exc.code}: {details}"
+                ) from exc
+            except error.URLError as exc:
+                if attempt_index < max_attempts - 1 and _is_transient_transport_failure(exc):
+                    time.sleep(self.retry_backoff_seconds * (2**attempt_index))
+                    continue
+                raise LLMProviderError(
+                    _format_openai_transport_error(
+                        exc,
+                        timeout_seconds=self.timeout_seconds,
+                        attempt=attempt_no,
+                        max_attempts=max_attempts,
+                    )
+                ) from exc
+            except Exception as exc:
+                if attempt_index < max_attempts - 1 and _is_transient_transport_failure(exc):
+                    time.sleep(self.retry_backoff_seconds * (2**attempt_index))
+                    continue
+                raise LLMProviderError(
+                    _format_openai_transport_error(
+                        exc,
+                        timeout_seconds=self.timeout_seconds,
+                        attempt=attempt_no,
+                        max_attempts=max_attempts,
+                    )
+                ) from exc
+        if raw_text is None:
+            raise LLMProviderError("Planner provider request produced no response body.")
 
         try:
             response_payload = json.loads(raw_text)
@@ -304,13 +404,17 @@ class GoogleGenerativeLanguageProvider:
         base_url: str,
         model_name: str,
         api_key: str | None = None,
-        timeout_seconds: float = 30.0,
+        timeout_seconds: float = 90.0,
+        max_retries: int = 2,
+        retry_backoff_seconds: float = 0.75,
         temperature: float = 0.0,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model_name = model_name
         self.api_key = api_key
         self.timeout_seconds = timeout_seconds
+        self.max_retries = max(0, int(max_retries))
+        self.retry_backoff_seconds = retry_backoff_seconds
         self.temperature = temperature
 
     def endpoint(self) -> str:
@@ -364,20 +468,45 @@ class GoogleGenerativeLanguageProvider:
             method="POST",
         )
 
-        try:
-            with request.urlopen(http_request, timeout=self.timeout_seconds) as response:
-                raw_text = response.read().decode("utf-8")
-        except error.HTTPError as exc:
-            details = exc.read().decode("utf-8", errors="replace")
-            raise LLMProviderError(
-                f"Planner provider returned HTTP {exc.code}: {details}"
-            ) from exc
-        except error.URLError as exc:
-            raise LLMProviderError(
-                f"Planner provider is unavailable: {exc.reason}"
-            ) from exc
-        except Exception as exc:
-            raise LLMProviderError(f"Planner provider request failed: {exc}") from exc
+        max_attempts = 1 + self.max_retries
+        raw_text: str | None = None
+        for attempt_index in range(max_attempts):
+            attempt_no = attempt_index + 1
+            try:
+                with request.urlopen(http_request, timeout=self.timeout_seconds) as response:
+                    raw_text = response.read().decode("utf-8")
+                break
+            except error.HTTPError as exc:
+                details = exc.read().decode("utf-8", errors="replace")
+                raise LLMProviderError(
+                    f"Planner provider returned HTTP {exc.code}: {details}"
+                ) from exc
+            except error.URLError as exc:
+                if attempt_index < max_attempts - 1 and _is_transient_transport_failure(exc):
+                    time.sleep(self.retry_backoff_seconds * (2**attempt_index))
+                    continue
+                raise LLMProviderError(
+                    _format_gemini_transport_error(
+                        exc,
+                        timeout_seconds=self.timeout_seconds,
+                        attempt=attempt_no,
+                        max_attempts=max_attempts,
+                    )
+                ) from exc
+            except Exception as exc:
+                if attempt_index < max_attempts - 1 and _is_transient_transport_failure(exc):
+                    time.sleep(self.retry_backoff_seconds * (2**attempt_index))
+                    continue
+                raise LLMProviderError(
+                    _format_gemini_transport_error(
+                        exc,
+                        timeout_seconds=self.timeout_seconds,
+                        attempt=attempt_no,
+                        max_attempts=max_attempts,
+                    )
+                ) from exc
+        if raw_text is None:
+            raise LLMProviderError("Planner provider request produced no response body.")
 
         try:
             response_payload = json.loads(raw_text)

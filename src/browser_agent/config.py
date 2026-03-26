@@ -32,7 +32,9 @@ class RuntimeSettings(BaseModel):
     planner_base_url: str | None = None
     planner_model: str | None = None
     planner_api_key: str | None = None
-    planner_timeout_seconds: float = 30.0
+    planner_timeout_seconds: float = 90.0
+    planner_retries: int = 2
+    planner_retry_backoff_seconds: float = 0.75
     planner_temperature: float = 0.0
 
     @classmethod
@@ -71,7 +73,11 @@ class RuntimeSettings(BaseModel):
             planner_model=os.getenv("BROWSER_AGENT_PLANNER_MODEL"),
             planner_api_key=os.getenv("BROWSER_AGENT_PLANNER_API_KEY"),
             planner_timeout_seconds=float(
-                os.getenv("BROWSER_AGENT_PLANNER_TIMEOUT_SECONDS", "30")
+                os.getenv("BROWSER_AGENT_PLANNER_TIMEOUT_SECONDS", "90")
+            ),
+            planner_retries=int(os.getenv("BROWSER_AGENT_PLANNER_RETRIES", "2")),
+            planner_retry_backoff_seconds=float(
+                os.getenv("BROWSER_AGENT_PLANNER_RETRY_BACKOFF_SECONDS", "0.75")
             ),
             planner_temperature=float(
                 os.getenv("BROWSER_AGENT_PLANNER_TEMPERATURE", "0")

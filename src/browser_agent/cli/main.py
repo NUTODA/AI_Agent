@@ -88,7 +88,7 @@ def app() -> int:
         p.add_argument("demo_name", choices=["food", "jobs", "spam"])
         p.add_argument("--ui", action="store_true")
         p.add_argument("--headed", action="store_true")
-        p.add_argument("--max-steps", type=int, default=25)
+        p.add_argument("--max-steps", type=int, default=50)
         try:
             args = p.parse_args(rest)
         except SystemExit as e:

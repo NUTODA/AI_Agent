@@ -63,6 +63,8 @@ def run_demo(name: str, url: str, task: str, settings: RuntimeSettings) -> Final
         model_name=demo_settings.planner_model,
         api_key=demo_settings.planner_api_key,
         timeout_seconds=demo_settings.planner_timeout_seconds,
+        max_retries=demo_settings.planner_retries,
+        retry_backoff_seconds=demo_settings.planner_retry_backoff_seconds,
         temperature=demo_settings.planner_temperature,
     )
     parser = PlannerResponseParser(skill_registry=skill_registry)
