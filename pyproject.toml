@@ -22,7 +22,7 @@ dev = [
 ]
 
 [project.scripts]
-browser-agent = "browser_agent.cli.main:app"
+browser-agent = "browser_agent.main:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
