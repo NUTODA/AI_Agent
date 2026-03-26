@@ -533,3 +533,45 @@ def test_planner_context_includes_latest_extracted_text(tmp_path) -> None:
 
     assert "Latest extracted page text:" in context_text
     assert "Short report excerpt." in context_text
+
+
+def test_planner_context_shows_text_end_for_long_extraction(tmp_path) -> None:
+    settings = RuntimeSettings(
+        trace_dir=tmp_path / "traces",
+        artifact_dir=tmp_path / "artifacts",
+    )
+    session = RuntimeSession(
+        task=UserTask(request="Read the full document"),
+        settings=settings,
+    )
+    long_text = "START " + ("A" * 1900) + " FINISH_SECTION"
+    browser = StubBrowserEngine(
+        initial_state=PageState(
+            url="https://example.com/spec",
+            title="Spec",
+            summary="Specification page.",
+            text_excerpt=long_text,
+        )
+    )
+    loop = build_loop(
+        planner=QueuePlanner(
+            [
+                act_decision(
+                    skill="extract_page_text",
+                    skill_input={"max_chars": 4000},
+                    rationale="Read the page.",
+                    expected_outcome="The runtime captures readable page text.",
+                )
+            ]
+        ),
+        browser=browser,
+        trace_dir=settings.trace_dir,
+    )
+
+    loop.run(session)
+    context_text = build_planner_context(session.build_planner_context(available_skills=[]))
+
+    assert "prompt_excerpt_note" in context_text
+    assert "text_start:" in context_text
+    assert "text_end:" in context_text
+    assert "FINISH_SECTION" in context_text

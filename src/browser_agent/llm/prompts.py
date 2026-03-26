@@ -172,11 +172,31 @@ def _render_latest_extracted_text(session_state) -> str:
     if not text:
         return "- none"
 
+    truncated = (
+        session_state.latest_extracted_text_truncated
+        if session_state.latest_extracted_text_truncated is not None
+        else "unknown"
+    )
+    total_chars = len(text)
     lines = [
         f"- source_url: {session_state.latest_extracted_text_url or 'unknown'}",
-        f"- truncated: {session_state.latest_extracted_text_truncated if session_state.latest_extracted_text_truncated is not None else 'unknown'}",
-        f"- text: {text[:1500]}",
+        f"- truncated: {truncated}",
+        f"- total_chars: {total_chars}",
     ]
+
+    if total_chars <= 1800:
+        lines.append(f"- text: {text}")
+        return "\n".join(lines)
+
+    # The planner context is prompt-budgeted, so include both the start and end of the
+    # extracted text. This avoids implying that the source document itself was truncated.
+    lines.extend(
+        [
+            "- prompt_excerpt_note: only excerpts are shown below for prompt size; this does not mean the extracted source text was truncated",
+            f"- text_start: {text[:900]}",
+            f"- text_end: {text[-900:]}",
+        ]
+    )
     return "\n".join(lines)
 
 
