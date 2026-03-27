@@ -62,6 +62,10 @@ def test_bare_quoted_task_dispatches_to_run(monkeypatch) -> None:
             reason_summary=f"Bootstrap picked a site for: {task_text}",
         ),
     )
+    monkeypatch.setattr(
+        "browser_agent.cli.bootstrap.interactive_stdio_available",
+        lambda: False,
+    )
     monkeypatch.setattr("browser_agent.cli.main.run_cli_from_args", fake_run_cli_from_args)
 
     old = sys.argv
@@ -98,6 +102,10 @@ def test_bare_unquoted_task_words_are_joined_into_single_request(monkeypatch) ->
             confidence=0.55,
             reason_summary=f"Bootstrap chose search for: {task_text}",
         ),
+    )
+    monkeypatch.setattr(
+        "browser_agent.cli.bootstrap.interactive_stdio_available",
+        lambda: False,
     )
     monkeypatch.setattr("browser_agent.cli.main.run_cli_from_args", fake_run_cli_from_args)
 
@@ -146,6 +154,39 @@ def test_run_subcommand_keeps_explicit_non_ui_defaults(monkeypatch) -> None:
     assert captured["ui"] is False
     assert captured["headed"] is False
     assert captured["start_url"] is None
+
+
+def test_bare_mode_enables_chat_in_interactive_terminal(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_cli_from_args(args: Namespace, *, task_override: str | None = None) -> object:
+        captured["chat"] = args.chat
+        captured["ui"] = args.ui
+        captured["headed"] = args.headed
+        captured["task_override"] = task_override
+        return object()
+
+    monkeypatch.setattr(
+        "browser_agent.cli.bootstrap.interactive_stdio_available",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "browser_agent.cli.bootstrap.resolve_bootstrap_decision",
+        lambda task_text, settings: None,
+    )
+    monkeypatch.setattr("browser_agent.cli.main.run_cli_from_args", fake_run_cli_from_args)
+
+    old = sys.argv
+    try:
+        sys.argv = ["browser-agent", "Открой корзину"]
+        code = app()
+        assert code == 0
+    finally:
+        sys.argv = old
+
+    assert captured["chat"] is True
+    assert captured["ui"] is True
+    assert captured["headed"] is True
 
 
 def test_infer_explicit_start_url_only_for_url_or_domain() -> None:

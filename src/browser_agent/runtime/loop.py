@@ -92,6 +92,7 @@ class RuntimeLoop:
         event_emitter: RuntimeEventEmitter | None = None,
         planner_display_name: str | None = None,
         planner_provider_kind: str | None = None,
+        keep_browser_open: bool = False,
     ) -> None:
         self.planner = planner
         self.skill_registry = skill_registry
@@ -104,6 +105,7 @@ class RuntimeLoop:
         self._events: RuntimeEventEmitter = event_emitter or NoOpEventEmitter()
         self._planner_display_name = planner_display_name
         self._planner_provider_kind = planner_provider_kind
+        self.keep_browser_open = keep_browser_open
 
     def _finish(self, session: RuntimeSession, report: FinalReport) -> FinalReport:
         result = session.complete(report)
@@ -466,7 +468,7 @@ class RuntimeLoop:
         finally:
             # Don't stop browser if waiting for confirmation or user input
             # to allow seamless resume via continue_after_confirmation/continue_after_user_answer
-            if session.status not in {
+            if not self.keep_browser_open and session.status not in {
                 RuntimeStatus.WAITING_FOR_CONFIRMATION,
                 RuntimeStatus.WAITING_FOR_USER,
                 RuntimeStatus.WAITING_FOR_INTERVENTION,

@@ -282,7 +282,7 @@ class BrokenObservationBrowser(StubBrowserEngine):
         raise RuntimeError("DOM snapshot evaluation crashed")
 
 
-def build_loop(*, planner, browser, trace_dir) -> RuntimeLoop:
+def build_loop(*, planner, browser, trace_dir, keep_browser_open: bool = False) -> RuntimeLoop:
     return RuntimeLoop(
         planner=planner,
         skill_registry=build_default_registry(),
@@ -290,6 +290,7 @@ def build_loop(*, planner, browser, trace_dir) -> RuntimeLoop:
         safety_guardrails=SafetyGuardrails(),
         confirmation_manager=ConfirmationManager(),
         trace_recorder=TraceRecorder(trace_dir=trace_dir),
+        keep_browser_open=keep_browser_open,
     )
 
 
@@ -328,6 +329,45 @@ def test_runtime_loop_maps_browser_failure_into_structured_tool_result(tmp_path)
     assert session.latest_observation.page_title == "Dashboard"
     assert session.trace_items[0].planner_decision_type == PlannerDecisionType.ACT
     assert any(path.suffix == ".jsonl" for path in settings.trace_dir.iterdir())
+
+
+def test_runtime_loop_keeps_browser_open_when_requested(tmp_path) -> None:
+    class CountingBrowser(StubBrowserEngine):
+        def __init__(self, initial_state: PageState) -> None:
+            super().__init__(initial_state=initial_state)
+            self.stop_calls = 0
+
+        def stop(self) -> None:
+            self.stop_calls += 1
+            super().stop()
+
+    settings = RuntimeSettings(
+        trace_dir=tmp_path / "traces",
+        artifact_dir=tmp_path / "artifacts",
+    )
+    session = RuntimeSession(
+        task=UserTask(request="Stay on the current page"),
+        settings=settings,
+    )
+    browser = CountingBrowser(
+        initial_state=PageState(
+            url="https://example.com/dashboard",
+            title="Dashboard",
+            summary="Dashboard is already open.",
+            text_excerpt="Everything is ready.",
+        )
+    )
+    loop = build_loop(
+        planner=QueuePlanner([finish_decision("Nothing else is needed.")]),
+        browser=browser,
+        trace_dir=settings.trace_dir,
+        keep_browser_open=True,
+    )
+
+    report = loop.run(session)
+
+    assert report.status == RuntimeStatus.COMPLETED
+    assert browser.stop_calls == 0
 
 
 def test_runtime_loop_replans_after_recoverable_targeting_validation(tmp_path) -> None:

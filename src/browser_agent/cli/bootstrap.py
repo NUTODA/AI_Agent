@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from argparse import Namespace
 from textwrap import dedent
 from typing import Literal
@@ -125,6 +126,8 @@ def apply_smart_bootstrap(args: Namespace, *, bare_mode: bool) -> Namespace:
             updates["ui"] = True
         if not getattr(args, "headed", False):
             updates["headed"] = True
+        if not getattr(args, "chat", False) and interactive_stdio_available():
+            updates["chat"] = True
 
     if not getattr(args, "start_url", None):
         task_text = " ".join(getattr(args, "task", []) or []).strip()
@@ -136,6 +139,15 @@ def apply_smart_bootstrap(args: Namespace, *, bare_mode: bool) -> Namespace:
     if not updates:
         return args
     return Namespace(**{**vars(args), **updates})
+
+
+def interactive_stdio_available() -> bool:
+    """Whether the current process is attached to an interactive terminal."""
+
+    try:
+        return bool(sys.stdin.isatty() and sys.stdout.isatty())
+    except Exception:
+        return False
 
 
 def resolve_bootstrap_decision(

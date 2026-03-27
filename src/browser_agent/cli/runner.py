@@ -9,6 +9,7 @@ from argparse import Namespace
 from typing import Sequence
 
 from browser_agent.browser.engine import PlaywrightBrowserEngine
+from browser_agent.cli.bootstrap import infer_explicit_start_url
 from browser_agent.config import (
     RuntimeSettings,
     home_config_path,
@@ -84,6 +85,14 @@ def build_run_parser() -> argparse.ArgumentParser:
         help="UI presentation mode for --ui: demo is split-screen friendly, debug shows full detail.",
     )
     parser.add_argument(
+        "--chat",
+        action="store_true",
+        help=(
+            "Keep the browser open and continue the conversation after each completed run. "
+            "Type `exit` to finish the chat session."
+        ),
+    )
+    parser.add_argument(
         "--skip-setup-check",
         action="store_true",
         help=argparse.SUPPRESS,
@@ -106,6 +115,17 @@ def run_cli_from_args(args: Namespace, *, task_override: str | None = None) -> F
 
     if args.ui and args.json:
         print("[ERROR] --ui and --json cannot be used together.", file=sys.stderr)
+        report = FinalReport(
+            session_id=new_id("session"),
+            status=RuntimeStatus.STOPPED,
+            summary="Invalid CLI flags.",
+            completed=False,
+            step_count=0,
+        )
+        return report
+
+    if args.chat and args.json:
+        print("[ERROR] --chat and --json cannot be used together.", file=sys.stderr)
         report = FinalReport(
             session_id=new_id("session"),
             status=RuntimeStatus.STOPPED,
@@ -151,14 +171,13 @@ def run_cli_from_args(args: Namespace, *, task_override: str | None = None) -> F
             print(render_text_report(report, session=None))
         return report
 
-    task = UserTask(
-        request=task_text,
-        start_url=args.start_url,
-    )
-    session = RuntimeSession(task=task, settings=settings)
     skill_registry = build_default_registry()
-    planner, planner_error = build_planner(settings, skill_registry, session=session)
-    if planner is None:
+    _, planner_error = build_planner(settings, skill_registry, session=None)
+    if planner_error is not None:
+        session = RuntimeSession(
+            task=UserTask(request=task_text, start_url=args.start_url),
+            settings=settings,
+        )
         report = FinalReport(
             session_id=session.session_id,
             status=RuntimeStatus.STOPPED,
@@ -181,38 +200,33 @@ def run_cli_from_args(args: Namespace, *, task_override: str | None = None) -> F
         return report
 
     browser = build_browser_engine(settings)
-    if args.ui:
-        from browser_agent.ui.console import AgentConsoleApp
+    try:
+        if args.chat:
+            return run_cli_chat(
+                args=args,
+                settings=settings,
+                skill_registry=skill_registry,
+                browser=browser,
+                initial_task_text=task_text,
+                initial_start_url=args.start_url,
+            )
 
-        console_app = AgentConsoleApp(session=session, settings=settings, ui_mode=args.ui_mode)
-        loop = RuntimeLoop(
-            planner=planner,
+        return run_single_task(
+            args=args,
+            settings=settings,
             skill_registry=skill_registry,
             browser=browser,
-            safety_guardrails=SafetyGuardrails(),
-            confirmation_manager=ConfirmationManager(),
-            trace_recorder=TraceRecorder(trace_dir=settings.trace_dir),
-            event_emitter=console_app,
-            planner_display_name=settings.planner_model,
-            planner_provider_kind=settings.planner_provider,
+            task_text=task_text,
+            start_url=args.start_url,
+            keep_browser_open=False,
+            render_output=True,
         )
-        return console_app.run_interactive_loop(loop)
-
-    loop = RuntimeLoop(
-        planner=planner,
-        skill_registry=skill_registry,
-        browser=browser,
-        safety_guardrails=SafetyGuardrails(),
-        confirmation_manager=ConfirmationManager(),
-        trace_recorder=TraceRecorder(trace_dir=settings.trace_dir),
-    )
-    report = run_cli_interactive(loop, session, args_json=args.json)
-
-    if args.json:
-        print(json.dumps(report.model_dump(mode="json"), indent=2))
-    else:
-        print(render_text_report(report, session=session))
-    return report
+    finally:
+        if args.chat:
+            try:
+                browser.stop()
+            except Exception:
+                pass
 
 
 def build_browser_engine(settings: RuntimeSettings) -> PlaywrightBrowserEngine:
@@ -227,6 +241,329 @@ def build_browser_engine(settings: RuntimeSettings) -> PlaywrightBrowserEngine:
         action_delay_ms=settings.action_delay_ms,
         highlight_actions=settings.highlight_actions,
     )
+
+
+def build_runtime_loop(
+    *,
+    settings: RuntimeSettings,
+    skill_registry,
+    browser,
+    planner,
+    event_emitter=None,
+    keep_browser_open: bool = False,
+) -> RuntimeLoop:
+    """Create a runtime loop for one task turn."""
+
+    return RuntimeLoop(
+        planner=planner,
+        skill_registry=skill_registry,
+        browser=browser,
+        safety_guardrails=SafetyGuardrails(),
+        confirmation_manager=ConfirmationManager(),
+        trace_recorder=TraceRecorder(trace_dir=settings.trace_dir),
+        event_emitter=event_emitter,
+        planner_display_name=settings.planner_model,
+        planner_provider_kind=settings.planner_provider,
+        keep_browser_open=keep_browser_open,
+    )
+
+
+def run_single_task(
+    *,
+    args: Namespace,
+    settings: RuntimeSettings,
+    skill_registry,
+    browser,
+    task_text: str,
+    start_url: str | None,
+    keep_browser_open: bool,
+    render_output: bool,
+) -> FinalReport:
+    """Execute one task turn against the current browser session."""
+
+    session = RuntimeSession(
+        task=UserTask(
+            request=task_text,
+            start_url=start_url,
+        ),
+        settings=settings,
+    )
+    planner, planner_error = build_planner(settings, skill_registry, session=session)
+    if planner is None:
+        report = FinalReport(
+            session_id=session.session_id,
+            status=RuntimeStatus.STOPPED,
+            summary=planner_error or "Planner is not configured.",
+            completed=False,
+            next_steps=[
+                "Set `BROWSER_AGENT_PLANNER_ENABLED=true`.",
+                "Set `BROWSER_AGENT_PLANNER_PROVIDER` to `openai_compatible` or `google_compatible`.",
+                "Set `BROWSER_AGENT_PLANNER_BASE_URL` to the provider endpoint.",
+                "Set `BROWSER_AGENT_PLANNER_MODEL` to the planner model name.",
+                "Set `BROWSER_AGENT_PLANNER_API_KEY` to your API key.",
+                "Or run: browser-agent setup",
+            ],
+            step_count=0,
+        )
+        if render_output:
+            if args.json:
+                print(json.dumps(report.model_dump(mode="json"), indent=2))
+            else:
+                print(render_text_report(report, session=session))
+        return report
+
+    if args.ui:
+        from browser_agent.ui.console import AgentConsoleApp
+
+        console_app = AgentConsoleApp(
+            session=session,
+            settings=settings,
+            ui_mode=args.ui_mode,
+        )
+        loop = build_runtime_loop(
+            settings=settings,
+            skill_registry=skill_registry,
+            browser=browser,
+            planner=planner,
+            event_emitter=console_app,
+            keep_browser_open=keep_browser_open,
+        )
+        return console_app.run_interactive_loop(loop)
+
+    loop = build_runtime_loop(
+        settings=settings,
+        skill_registry=skill_registry,
+        browser=browser,
+        planner=planner,
+        keep_browser_open=keep_browser_open,
+    )
+    report = run_cli_interactive(loop, session, args_json=args.json)
+
+    if render_output:
+        if args.json:
+            print(json.dumps(report.model_dump(mode="json"), indent=2))
+        else:
+            print(render_text_report(report, session=session))
+    return report
+
+
+def run_cli_chat(
+    *,
+    args: Namespace,
+    settings: RuntimeSettings,
+    skill_registry,
+    browser,
+    initial_task_text: str,
+    initial_start_url: str | None,
+) -> FinalReport:
+    """Run a multi-turn chat session while keeping the browser alive."""
+
+    print(
+        "[browser-agent] Chat mode is active. The browser will stay open between turns. "
+        "Type `exit` when you're done."
+    )
+    report = run_single_task(
+        args=args,
+        settings=settings,
+        skill_registry=skill_registry,
+        browser=browser,
+        task_text=initial_task_text,
+        start_url=initial_start_url,
+        keep_browser_open=True,
+        render_output=False,
+    )
+    if not args.ui:
+        print_chat_response(report)
+
+    while True:
+        next_task = prompt_for_chat_message()
+        if next_task is None:
+            return report
+
+        chat_answer = maybe_answer_from_previous_run(
+            next_task,
+            previous_report=report,
+            settings=settings,
+        )
+        if chat_answer is not None:
+            print(f"\nAssistant: {chat_answer}\n")
+            continue
+
+        report = run_single_task(
+            args=args,
+            settings=settings,
+            skill_registry=skill_registry,
+            browser=browser,
+            task_text=next_task,
+            start_url=infer_explicit_start_url(next_task),
+            keep_browser_open=True,
+            render_output=False,
+        )
+        if not args.ui:
+            print_chat_response(report)
+
+
+def print_chat_response(report: FinalReport) -> None:
+    """Print a concise assistant-style reply for chat mode."""
+
+    message = (
+        (report.completion_reason or "").strip()
+        or (report.summary or "").strip()
+        or (report.failure_reason or "").strip()
+        or "Task finished."
+    )
+    if report.status == RuntimeStatus.FAILED:
+        label = "Assistant (failed)"
+    elif report.status == RuntimeStatus.STOPPED:
+        label = "Assistant (partial)"
+    else:
+        label = "Assistant"
+    print(f"\n{label}: {message}\n")
+
+
+def maybe_answer_from_previous_run(
+    message: str,
+    *,
+    previous_report: FinalReport,
+    settings: RuntimeSettings,
+) -> str | None:
+    """Answer meta follow-up questions about the previous run without starting a new one."""
+
+    normalized = " ".join(message.lower().split())
+    if not normalized:
+        return None
+    if not _looks_like_meta_followup(normalized):
+        return None
+    return build_previous_run_answer(
+        normalized,
+        previous_report=previous_report,
+        settings=settings,
+    )
+
+
+def _looks_like_meta_followup(message: str) -> bool:
+    """Heuristic: distinguish chat about the previous run from a new browser task."""
+
+    meta_markers = (
+        "ошиб",
+        "упал",
+        "сломал",
+        "сломался",
+        "не получилось",
+        "не вышло",
+        "не сработал",
+        "почему",
+        "зачем",
+        "что пошло не так",
+        "что случилось",
+        "что ты сделал",
+        "что сделал",
+        "какая ошибка",
+        "какой шаг",
+        "на каком шаге",
+        "где останов",
+        "почему останов",
+        "почему словил",
+        "почему ты",
+        "почему агент",
+        "log",
+        "logs",
+        "trace",
+        "traces",
+        "runtime",
+        "navigate",
+        "timeout",
+    )
+    question_starters = (
+        "почему",
+        "зачем",
+        "что",
+        "где",
+        "какая",
+        "какой",
+        "на каком",
+        "why",
+        "what",
+        "where",
+        "which",
+    )
+    if any(marker in message for marker in meta_markers):
+        return True
+    return message.endswith("?") and message.startswith(question_starters)
+
+
+def build_previous_run_answer(
+    message: str,
+    *,
+    previous_report: FinalReport,
+    settings: RuntimeSettings,
+) -> str:
+    """Build a short conversational answer from the previous run summary."""
+
+    status = previous_report.status
+    action = previous_report.actions_taken[0] if previous_report.actions_taken else None
+    failure_reason = (previous_report.failure_reason or "").strip()
+    summary = (previous_report.summary or "").strip()
+    final_url = (previous_report.final_url or "about:blank").strip() or "about:blank"
+    timeout_seconds = max(1, int(round(settings.default_timeout_ms / 1000.0)))
+
+    if any(token in message for token in ("что ты сделал", "что сделал", "какой шаг", "на каком шаге")):
+        if previous_report.actions_taken:
+            return (
+                f"В прошлом запуске я успел сделать {previous_report.step_count} шаг(ов): "
+                f"{', '.join(previous_report.actions_taken)}. "
+                f"Последний известный URL: {final_url}."
+            )
+        return (
+            f"В прошлом запуске я почти не успел выполнить действий. "
+            f"Статус был `{status.value}`, последний известный URL: {final_url}."
+        )
+
+    if status == RuntimeStatus.FAILED:
+        if action == "navigate":
+            return (
+                f"Я словил ошибку на шаге `navigate`: переход на страницу не завершился в пределах "
+                f"таймаута примерно {timeout_seconds} сек., поэтому runtime остановился. "
+                f"По последнему состоянию браузер остался на `{final_url}`, то есть целевая страница так и не успела открыться. "
+                f"Ближайшая причина из отчёта: {failure_reason or summary or 'navigate timed out'}."
+            )
+        return (
+            f"Прошлый запуск завершился со статусом `failed`. "
+            f"Сбой произошёл на действии `{action or 'unknown'}`. "
+            f"Причина из отчёта: {failure_reason or summary or 'точная причина не была записана'}. "
+            f"Последний известный URL: {final_url}."
+        )
+
+    if status == RuntimeStatus.STOPPED:
+        return (
+            f"Прошлый запуск остановился со статусом `stopped`. "
+            f"Причина: {failure_reason or summary or 'runtime остановился без дополнительной детали'}. "
+            f"Последний известный URL: {final_url}."
+        )
+
+    return (
+        f"Прошлый запуск завершился со статусом `{status.value}`. "
+        f"Коротко: {previous_report.completion_reason or summary or 'задача завершилась без дополнительного комментария'}."
+    )
+
+
+def prompt_for_chat_message() -> str | None:
+    """Read the next user turn for CLI chat mode."""
+
+    while True:
+        try:
+            answer = input("You: ")
+        except EOFError:
+            return None
+        except KeyboardInterrupt:
+            print()
+            return None
+
+        text = answer.strip()
+        if text.lower() in {"exit", "quit", "/exit", "/quit"}:
+            return None
+        if text:
+            return text
 
 
 def render_text_report(report: FinalReport, *, session: RuntimeSession | None = None) -> str:
