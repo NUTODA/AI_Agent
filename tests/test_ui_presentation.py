@@ -80,7 +80,7 @@ def test_build_layout_does_not_break_on_rich_markup_like_strings() -> None:
 def _layout_export_text(state: AgentConsoleState) -> str:
     from rich.console import Console
 
-    c = Console(record=True, width=120, legacy_windows=False, force_terminal=True)
+    c = Console(record=True, width=120, height=50, legacy_windows=False, force_terminal=True)
     c.print(build_layout(state))
     return c.export_text()
 
@@ -90,7 +90,7 @@ def test_build_layout_idle_bottom_panel_operator_read_only() -> None:
     state.bottom_mode = "idle"
     text = _layout_export_text(state)
     assert "Operator" in text
-    assert "not a text field" in text.lower() or "status only" in text.lower()
+    assert "running autonomously" in text.lower() or "input is required" in text.lower()
 
 
 def test_build_layout_confirm_bottom_panel_title() -> None:
@@ -112,6 +112,27 @@ def test_build_layout_input_bottom_panel_question_title() -> None:
     assert "Question" in text
     assert "Which size?" in text
     assert "read-only" in text.lower() or "not a text field" in text.lower()
+
+
+def test_build_layout_debug_mode_keeps_operator_read_only_copy() -> None:
+    state = AgentConsoleState()
+    state.ui_mode = "debug"
+    text = _layout_export_text(state)
+    assert "Operator" in text
+    assert "not a text field" in text.lower() or "status only" in text.lower()
+
+
+def test_build_layout_debug_narrow_width_does_not_break() -> None:
+    from rich.console import Console
+
+    state = AgentConsoleState()
+    state.ui_mode = "debug"
+    state.human_summary = "Inspecting the page"
+    c = Console(record=True, width=100, legacy_windows=False, force_terminal=True)
+    c.print(build_layout(state, width=100))
+    text = c.export_text()
+    assert "Agent Console" in text
+    assert "Status & tokens" in text
 
 
 def test_build_final_summary_lines_structure() -> None:

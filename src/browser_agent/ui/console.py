@@ -146,10 +146,17 @@ def _print_pending_user_question(console: Console, question: str) -> None:
 class AgentConsoleApp:
     """Operator console: implements RuntimeEventEmitter protocol via emit()."""
 
-    def __init__(self, session: RuntimeSession, settings: RuntimeSettings) -> None:
+    def __init__(
+        self,
+        session: RuntimeSession,
+        settings: RuntimeSettings,
+        *,
+        ui_mode: str = "demo",
+    ) -> None:
         self.session = session
         self.settings = settings
         self.state = AgentConsoleState()
+        self.state.ui_mode = "debug" if ui_mode == "debug" else "demo"
         self.state.task = session.task.request
         self.state.model_name = settings.planner_model
         self.state.provider_kind = settings.planner_provider
@@ -411,7 +418,7 @@ class AgentConsoleApp:
 
     def _refresh(self) -> None:
         if self._live is not None:
-            self._live.update(build_layout(self.state), refresh=True)
+            self._live.update(build_layout(self.state, width=self.console.width), refresh=True)
 
     def _latency_avg_display(self) -> str:
         if self.state.llm_latency_count <= 0:
@@ -423,7 +430,17 @@ class AgentConsoleApp:
     def _key_actions_from_session(self, max_items: int = 5) -> list[str]:
         fr = self.session.final_report
         if fr and fr.actions_taken:
-            return [str(a) for a in fr.actions_taken[:max_items]]
+            out: list[str] = []
+            seen: set[str] = set()
+            for action in fr.actions_taken:
+                label = str(action).strip()
+                if not label or label in seen:
+                    continue
+                seen.add(label)
+                out.append(label)
+                if len(out) >= max_items:
+                    break
+            return out
         lines: list[str] = []
         for item in self.session.trace_items[-12:]:
             name = item.action_name or (
@@ -526,7 +543,7 @@ class AgentConsoleApp:
                 "Traces and artifact paths appear in the final summary. "
                 "Set [bold]BROWSER_AGENT_ALT_SCREEN=1[/] for a full-screen alternate buffer.[/]\n"
             )
-        layout = build_layout(self.state)
+        layout = build_layout(self.state, width=self.console.width)
         report: FinalReport
         try:
             with Live(
@@ -535,7 +552,7 @@ class AgentConsoleApp:
                 refresh_per_second=4,
                 screen=use_alt,
                 transient=not use_alt,
-                vertical_overflow="visible",
+                vertical_overflow="crop",
             ) as live:
                 self._live = live
                 report = loop.run(self.session)
@@ -598,6 +615,8 @@ class AgentConsoleApp:
             _reset_terminal_after_live(self.console)
 
         if self.state.show_final_summary and self.state.final_summary_lines:
+            if not use_alt and self.console.is_terminal:
+                self.console.clear(home=True)
             self.console.print()
             self.console.print(build_final_summary_panel(self.state))
         if report.status == RuntimeStatus.COMPLETED:

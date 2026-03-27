@@ -16,9 +16,13 @@ from browser_agent.runtime.models import (
     AgentObservation,
     InteractiveElement,
     RiskLevel,
+    ToolExecutionStatus,
+    ToolResult,
     RuntimeStatus,
     UserTask,
 )
+from browser_agent.config import RuntimeSettings
+from browser_agent.runtime.session import RuntimeSession
 from browser_agent.browser.page_state import ElementRole, InteractiveElementState
 from browser_agent.browser.selectors import resolve_target_candidates
 
@@ -195,6 +199,63 @@ class TestElementTargetingValidation:
         # Should remain an act decision
         assert result.decision_type == PlannerDecisionType.ACT
         assert result.chosen_skill == "click_element"
+
+    def test_validate_element_targeting_rejects_redundant_navigation_click_after_full_text_extraction(self) -> None:
+        """Navigation-like clicks should be blocked once the same page text is already extracted."""
+        loop = create_mock_loop()
+
+        observation = AgentObservation(
+            page_url="https://example.com/spec",
+            page_title="Spec Title",
+            summary="Spec page",
+            visible_text_excerpt="Spec Title Requirements Architecture",
+            interactive_elements=[
+                InteractiveElement(
+                    element_id="element_title_btn",
+                    label="Spec Title",
+                    tag="button",
+                    role="button",
+                    text="Spec Title",
+                    selector='role=button[name="Spec Title"]',
+                ),
+            ],
+        )
+        session = RuntimeSession(
+            task=UserTask(request="Summarize the spec"),
+            settings=RuntimeSettings(max_steps=8),
+        )
+        session.add_tool_result(
+            ToolResult(
+                call_id="call_extract",
+                skill_name="extract_page_text",
+                status=ToolExecutionStatus.SUCCESS,
+                message="Extracted page text.",
+                data={
+                    "text": (
+                        "Spec Title\nRequirements\nArchitecture\n" * 120
+                    ),
+                    "truncated": False,
+                    "page_url": "https://example.com/spec",
+                },
+            )
+        )
+
+        decision = PlannerDecision(
+            decision_type=PlannerDecisionType.ACT,
+            rationale="Click the page title button to keep reading the document.",
+            chosen_skill="click_element",
+            skill_input={"element_id": "element_title_btn"},
+            expected_outcome="More of the same document becomes available.",
+        )
+
+        result = loop._validate_element_targeting(
+            decision,
+            observation,
+            session=session,
+        )
+
+        assert result.decision_type == PlannerDecisionType.FAIL
+        assert "redundant click" in (result.failure_reason or "").lower()
 
     def test_validate_element_targeting_rejects_ambiguous_selector(self) -> None:
         """Validation should reject selector matching multiple elements.

@@ -3,68 +3,95 @@
 from __future__ import annotations
 
 from rich import box
+from rich.console import Group
 from rich.layout import Layout
 from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from browser_agent.ui.formatting import humanize_result_status, humanize_skill_name, truncate_text
+from browser_agent.ui.formatting import (
+    format_step_line_compact,
+    humanize_result_status,
+    humanize_skill_name,
+    truncate_text,
+)
 from browser_agent.ui.models import AgentConsoleState, TimelineStepView
+
+PALETTE = {
+    "bg": "#0B0F10",
+    "fg": "#E6EDF3",
+    "muted": "#8B949E",
+    "border": "#2A3136",
+    "accent": "#7CFF5B",
+    "info": "#35C2FF",
+    "warning": "#FFCC66",
+    "danger": "#FF6B6B",
+    "panel": "#12181B",
+}
 
 
 def _phase_markup(phase: str) -> str:
     """Colored phase label for top bar."""
     p = phase.upper()
     styles = {
-        "IDLE": "dim",
-        "OBSERVE": "cyan",
-        "PLAN": "blue",
-        "GUARDRAIL": "yellow",
-        "ACT": "green",
-        "WAITING_CONFIRMATION": "magenta",
-        "WAITING_USER": "bright_cyan",
-        "FINISHED": "bold green",
-        "FAILED": "bold red",
+        "IDLE": PALETTE["muted"],
+        "OBSERVE": PALETTE["info"],
+        "PLAN": PALETTE["info"],
+        "GUARDRAIL": PALETTE["warning"],
+        "ACT": PALETTE["accent"],
+        "WAITING_CONFIRMATION": PALETTE["warning"],
+        "WAITING_USER": PALETTE["info"],
+        "FINISHED": f"bold {PALETTE['accent']}",
+        "FAILED": f"bold {PALETTE['danger']}",
     }
-    st = styles.get(p, "white")
+    st = styles.get(p, PALETTE["fg"])
     return f"[{st}]{p}[/{st}]"
 
 
 def _top_bar(state: AgentConsoleState) -> Panel:
     task = escape(truncate_text(state.task, 68))
     status_style = (
-        "yellow"
+        PALETTE["warning"]
         if state.status == "waiting"
-        else "green"
+        else PALETTE["accent"]
         if state.status == "running"
-        else "red"
+        else PALETTE["danger"]
         if state.status == "failed"
-        else "white"
+        else PALETTE["fg"]
     )
     step_disp = escape(state.step_display or "—")
     model_disp = escape(state.model_name or "—")
-    prov_disp = escape(state.provider_kind or "—")
-    line1 = (
-        f"[bold]Task[/] {task}   │   [{status_style}]{state.status.upper()}[/]   │   "
-        f"[bold]Step[/] {step_disp}   │   "
-        f"[bold]Model[/] {model_disp} [dim]({prov_disp})[/]"
-    )
+    line1 = f"[bold]Task[/] {task}"
     phase = _phase_markup(state.display_phase)
     summary_raw = (truncate_text(state.human_summary, 140) or "").strip()
     if not summary_raw:
-        narrative = "[dim]…[/]"
+        narrative = f"[{PALETTE['muted']}]…[/]"
     else:
         narrative = f"[italic]{escape(summary_raw)}[/italic]"
-    line2 = f"[bold]Phase[/] {phase}   │   {narrative}"
+    line2 = (
+        f"[{status_style} bold]{state.status.upper()}[/]   "
+        f"│   [bold]Phase[/] {phase}   "
+        f"│   [bold]Step[/] {step_disp}   "
+        f"│   [bold]Model[/] {model_disp}"
+    )
+    line3 = f"[bold]Now[/] {narrative}"
     body = Text.from_markup(f"{line1}\n{line2}")
-    return Panel(body, box=box.ROUNDED, title="Agent Console", padding=(0, 1))
+    if state.ui_mode == "demo":
+        body = Text.from_markup(f"{line1}\n{line2}\n{line3}")
+    return Panel(
+        body,
+        box=box.ROUNDED,
+        title="[bold]Agent Console[/]",
+        padding=(0, 1),
+        border_style=PALETTE["border"],
+    )
 
 
 def _status_panel(state: AgentConsoleState) -> Panel:
     tbl = Table.grid(padding=(0, 1))
-    tbl.add_column(style="cyan", justify="right")
-    tbl.add_column(style="white")
+    tbl.add_column(style=PALETTE["info"], justify="right")
+    tbl.add_column(style=PALETTE["fg"])
     approx = " [dim](estimated)[/]" if state.tokens_approximate else ""
     cost = (
         f"${state.estimated_cost_usd:.4f}"
@@ -96,7 +123,12 @@ def _status_panel(state: AgentConsoleState) -> Panel:
     tbl.add_row("Est. cost", cost)
     tbl.add_row("Latency avg", lat)
     tbl.add_row("Duration", dur)
-    return Panel(tbl, title="Status & tokens", border_style="blue", box=box.ROUNDED)
+    return Panel(
+        tbl,
+        title="Status & tokens",
+        border_style=PALETTE["info"],
+        box=box.ROUNDED,
+    )
 
 
 def _error_panel(state: AgentConsoleState) -> Panel | None:
@@ -112,7 +144,7 @@ def _error_panel(state: AgentConsoleState) -> Panel | None:
     return Panel(
         Text.from_markup(body),
         title="Issue",
-        border_style="red",
+        border_style=PALETTE["danger"],
         box=box.ROUNDED,
     )
 
@@ -122,14 +154,14 @@ def _timeline_panel(state: AgentConsoleState) -> Panel:
         return Panel(
             Text("Waiting for steps…", style="dim"),
             title="Steps (latest)",
-            border_style="green",
+            border_style=PALETTE["accent"],
             box=box.ROUNDED,
         )
     body = "\n\n".join(_format_step_card(s) for s in state.timeline)
     return Panel(
         Text.from_markup(body),
         title="Steps (latest)",
-        border_style="green",
+        border_style=PALETTE["accent"],
         box=box.ROUNDED,
     )
 
@@ -143,7 +175,8 @@ def _format_step_card(step: TimelineStepView) -> str:
     sk = escape(step.skill_display or humanize_skill_name(step.skill_name))
     phase = escape(step.phase_label or "—")
     return (
-        f"[bold magenta]Step {step.step_number + 1}[/]   [yellow]{phase}[/]\n"
+        f"[bold {PALETTE['info']}]Step {step.step_number + 1}[/]   "
+        f"[{PALETTE['warning']}]{phase}[/]\n"
         f"  [dim]Reason[/]     {reason}\n"
         f"  [dim]Skill[/]      {sk}\n"
         f"  [dim]Target[/]     {tgt}\n"
@@ -166,7 +199,69 @@ def _right_panel(state: AgentConsoleState) -> Panel:
     tbl.add_row("[bold]Interactive[/]", str(state.interactive_element_count))
     tbl.add_row("[bold]Warnings[/]", warns)
     tbl.add_row("[bold]Last decision[/]", f"{dec}\n{rat}")
-    return Panel(tbl, title="Current state", border_style="yellow", box=box.ROUNDED)
+    return Panel(
+        tbl,
+        title="Current state",
+        border_style=PALETTE["warning"],
+        box=box.ROUNDED,
+    )
+
+
+def _current_action_panel(state: AgentConsoleState) -> Panel:
+    why = escape(truncate_text(state.last_rationale or "Working through the next safe step.", 180))
+    expected = escape(
+        truncate_text(state.last_expected_outcome or "Waiting for a visible success signal.", 180)
+    )
+    now = escape(truncate_text(state.human_summary or "Working…", 180))
+    body = Text.from_markup(
+        f"[bold]Current action[/]\n{now}\n\n"
+        f"[bold]Why[/]\n{why}\n\n"
+        f"[bold]Expected[/]\n{expected}"
+    )
+    return Panel(
+        body,
+        title="Execution focus",
+        border_style=PALETTE["accent"],
+        box=box.ROUNDED,
+    )
+
+
+def _recent_progress_panel(state: AgentConsoleState) -> Panel:
+    steps = state.timeline[-3:]
+    if not steps:
+        body = Text("Waiting for the first completed step…", style=PALETTE["muted"])
+    else:
+        lines = "\n".join(format_step_line_compact(step) for step in steps)
+        body = Text(lines, style=PALETTE["fg"])
+    return Panel(
+        body,
+        title="Recent progress",
+        border_style=PALETTE["info"],
+        box=box.ROUNDED,
+    )
+
+
+def _compact_state_panel(state: AgentConsoleState) -> Panel:
+    url = escape(truncate_text(state.current_url or "—", 72))
+    title = escape(truncate_text(state.page_title or "—", 48))
+    warnings = state.observation_warnings[:2]
+    warning_line = (
+        "\n".join(f"• {truncate_text(w, 56)}" for w in warnings) if warnings else "None"
+    )
+    tbl = Table.grid(padding=(0, 1))
+    tbl.add_column(style=PALETTE["info"], justify="right")
+    tbl.add_column(style=PALETTE["fg"])
+    tbl.add_row("URL", url)
+    tbl.add_row("Page", title)
+    tbl.add_row("Interactive", str(state.interactive_element_count))
+    if warnings:
+        tbl.add_row("Warnings", warning_line)
+    return Panel(
+        tbl,
+        title="State",
+        border_style=PALETTE["border"],
+        box=box.ROUNDED,
+    )
 
 
 def _bottom_panel(state: AgentConsoleState) -> Panel:
@@ -184,7 +279,7 @@ def _bottom_panel(state: AgentConsoleState) -> Panel:
         return Panel(
             Text.from_markup(body),
             title="Confirmation",
-            border_style="red",
+            border_style=PALETTE["danger"],
             box=box.ROUNDED,
         )
     if state.bottom_mode == "input":
@@ -197,7 +292,18 @@ def _bottom_panel(state: AgentConsoleState) -> Panel:
         return Panel(
             Text.from_markup(body),
             title="Question",
-            border_style="cyan",
+            border_style=PALETTE["info"],
+            box=box.ROUNDED,
+        )
+    if state.ui_mode == "demo":
+        body = (
+            "[bold white]Running autonomously.[/]\n"
+            "[dim]The dashboard pauses only when approval or your input is required.[/]"
+        )
+        return Panel(
+            Text.from_markup(body),
+            title="Operator",
+            border_style=PALETTE["border"],
             box=box.ROUNDED,
         )
     body = (
@@ -210,7 +316,7 @@ def _bottom_panel(state: AgentConsoleState) -> Panel:
     return Panel(
         Text.from_markup(body),
         title="Operator",
-        border_style="dim",
+        border_style=PALETTE["border"],
         box=box.ROUNDED,
     )
 
@@ -231,8 +337,78 @@ def _center_stack(state: AgentConsoleState) -> Layout:
     return layout
 
 
-def build_layout(state: AgentConsoleState) -> Layout:
-    """Main operator layout: top, middle (3 cols), bottom."""
+def build_layout(state: AgentConsoleState, width: int | None = None) -> Layout:
+    """Main operator layout with mode-aware presentation."""
+    if state.ui_mode == "demo":
+        return build_layout_demo(state)
+    return build_layout_debug(state, width=width)
+
+
+def build_layout_demo(state: AgentConsoleState) -> Layout:
+    bottom_size = 8 if state.bottom_mode in {"confirm", "input"} else 5
+    layout = Layout()
+    layout.split_column(
+        Layout(name="top", size=5),
+        Layout(name="hero", size=9),
+        Layout(name="progress", size=6),
+        Layout(name="state", size=7),
+        Layout(name="bottom", size=bottom_size),
+    )
+    layout["top"].update(_top_bar(state))
+    layout["hero"].update(_current_action_panel(state))
+    layout["progress"].update(_recent_progress_panel(state))
+    if state.error_title:
+        layout["state"].update(
+            Group(
+                _error_panel(state),
+                _compact_state_panel(state),
+            )
+        )
+    else:
+        layout["state"].update(_compact_state_panel(state))
+    layout["bottom"].update(_bottom_panel(state))
+    return layout
+
+
+def build_layout_debug(state: AgentConsoleState, width: int | None = None) -> Layout:
+    """Debug operator layout, adaptive to terminal width."""
+    if width is not None and width < 110:
+        layout = Layout()
+        layout.split_column(
+            Layout(name="top", size=5),
+            Layout(name="status", size=13),
+            Layout(name="center", ratio=1),
+            Layout(name="right", size=12),
+            Layout(name="bottom", size=12),
+        )
+        layout["top"].update(_top_bar(state))
+        layout["status"].update(_status_panel(state))
+        layout["center"].update(_center_stack(state))
+        layout["right"].update(_right_panel(state))
+        layout["bottom"].update(_bottom_panel(state))
+        return layout
+    if width is not None and width < 150:
+        layout = Layout()
+        layout.split_column(
+            Layout(name="top", size=5),
+            Layout(name="middle", ratio=1),
+            Layout(name="bottom", size=12),
+        )
+        layout["top"].update(_top_bar(state))
+        layout["middle"].split_row(
+            Layout(name="main", ratio=2),
+            Layout(name="side", ratio=1),
+        )
+        layout["middle"]["main"].update(_center_stack(state))
+        layout["middle"]["side"].split_column(
+            Layout(name="status", ratio=1),
+            Layout(name="state", ratio=1),
+        )
+        layout["middle"]["side"]["status"].update(_status_panel(state))
+        layout["middle"]["side"]["state"].update(_right_panel(state))
+        layout["bottom"].update(_bottom_panel(state))
+        return layout
+
     layout = Layout()
     layout.split_column(
         Layout(name="top", size=5),

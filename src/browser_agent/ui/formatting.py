@@ -247,6 +247,7 @@ def build_final_summary_lines(data: FinalSummaryInput) -> list[str]:
     else:
         headline = "RUN STOPPED"
 
+    artifact_refs = list(dict.fromkeys([*data.artifact_refs, *data.trace_refs]))
     lines: list[str] = [
         headline,
         "",
@@ -264,7 +265,7 @@ def build_final_summary_lines(data: FinalSummaryInput) -> list[str]:
         f"Summary: {truncate_text(data.summary, 320)}",
     ]
     if data.failure_reason:
-        lines.extend(["", f"Failure: {truncate_text(data.failure_reason, 240)}"])
+        lines.extend(["", f"Why it stopped: {truncate_text(data.failure_reason, 240)}"])
     lines.extend(["", "Key actions:"])
     if data.key_actions:
         for a in data.key_actions[:5]:
@@ -278,10 +279,11 @@ def build_final_summary_lines(data: FinalSummaryInput) -> list[str]:
     else:
         lines.append("  —")
     lines.extend(["", "Artifacts (traces & files):"])
-    arts = list(data.artifact_refs) + list(data.trace_refs)
-    if arts:
-        for a in arts[:14]:
+    if artifact_refs:
+        for a in artifact_refs[:6]:
             lines.append(f"  • {truncate_text(a, 120)}")
+        if len(artifact_refs) > 6:
+            lines.append(f"  • … and {len(artifact_refs) - 6} more")
     else:
         lines.append("  —")
     return lines
@@ -302,3 +304,13 @@ def format_step_card_plain(step: TimelineStepView) -> str:
         f"Progress:\n{step.progress_note or '—'}",
     ]
     return "\n".join(lines)
+
+
+def format_step_line_compact(step: TimelineStepView) -> str:
+    """Single-line step summary for narrow demo layouts."""
+    result = (step.result_display or humanize_result_status(step.result_status) or "—").strip()
+    progress = (step.progress_note or step.expected_outcome or step.rationale_summary or "—").strip()
+    return (
+        f"{step.step_number + 1}. {truncate_text(result, 10)}  "
+        f"{truncate_text(progress, 60)}"
+    )

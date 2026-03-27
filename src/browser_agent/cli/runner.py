@@ -74,6 +74,12 @@ def build_run_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--ui-mode",
+        choices=("demo", "debug"),
+        default="demo",
+        help="UI presentation mode for --ui: demo is split-screen friendly, debug shows full detail.",
+    )
+    parser.add_argument(
         "--skip-setup-check",
         action="store_true",
         help=argparse.SUPPRESS,
@@ -167,7 +173,7 @@ def run_cli_from_args(args: Namespace, *, task_override: str | None = None) -> F
     if args.ui:
         from browser_agent.ui.console import AgentConsoleApp
 
-        console_app = AgentConsoleApp(session=session, settings=settings)
+        console_app = AgentConsoleApp(session=session, settings=settings, ui_mode=args.ui_mode)
         loop = RuntimeLoop(
             planner=planner,
             skill_registry=skill_registry,

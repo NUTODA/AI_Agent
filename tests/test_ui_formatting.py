@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from browser_agent.ui.formatting import format_step_card_plain
+from browser_agent.ui.formatting import format_step_card_plain, format_step_line_compact
 from browser_agent.ui.models import TimelineStepView
 
 
@@ -24,3 +24,20 @@ def test_format_step_card_text_includes_key_sections() -> None:
     assert "element_id=el_41" in text
     assert "Success" in text
     assert "navigated" in text
+
+
+def test_format_step_line_compact_contains_result_and_progress() -> None:
+    step = TimelineStepView(
+        step_number=1,
+        phase_label="ACT",
+        rationale_summary="Proceed to checkout",
+        expected_outcome="See cart",
+        skill_name="click_element",
+        target_summary="element_id=el_41",
+        result_status="success",
+        progress_note="Cart opened",
+    )
+    text = format_step_line_compact(step)
+    assert text.startswith("2.")
+    assert "Success" in text
+    assert "Cart opened" in text

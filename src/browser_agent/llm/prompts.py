@@ -39,6 +39,10 @@ PLANNER_SYSTEM_PROMPT = dedent(
     - For reading information (weather, forecasts, articles): prefer extract_page_text first;
       use scroll_viewport only when the extracted text was truncated or the needed content is
       hidden until a control is used.
+    - On content-heavy pages (docs, specs, articles), do not click navigation, table-of-contents,
+      page-title, or sidebar controls just to "read more" if extract_page_text already captured
+      the needed text from the same page. Only click when you have evidence the action will reveal
+      genuinely hidden content (for example an accordion, collapsed section, or modal).
     - If the recent steps are repeating read-only exploration on the same page
       (especially scroll_viewport + extract_page_text), do not continue the same pattern.
       Either finish with the evidence already collected, use a genuinely different action,

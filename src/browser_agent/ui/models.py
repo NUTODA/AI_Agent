@@ -19,6 +19,8 @@ DisplayPhase = Literal[
     "FAILED",
 ]
 
+UIMode = Literal["demo", "debug"]
+
 
 @dataclass
 class TimelineStepView:
@@ -41,6 +43,7 @@ class AgentConsoleState:
     """Mutable snapshot consumed by Rich render."""
 
     task: str = ""
+    ui_mode: UIMode = "demo"
     status: str = "pending"
     display_phase: DisplayPhase = "IDLE"
     max_steps_config: int = 0

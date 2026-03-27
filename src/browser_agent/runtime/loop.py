@@ -347,6 +347,7 @@ class RuntimeLoop:
                 decision = self._validate_element_targeting(
                     decision,
                     observation_before,
+                    session=session,
                 )
 
                 thought = decision.to_agent_thought()
@@ -581,7 +582,7 @@ class RuntimeLoop:
             session_id=session.session_id,
             status=RuntimeStatus.FAILED,
             summary=(
-                f"Runtime stopped because `{action.tool_name}` was selected repeatedly "
+                f"Runtime stopped because the planner repeatedly chose `{action.tool_name}` "
                 "without observable progress."
             ),
             completed=False,
@@ -591,7 +592,10 @@ class RuntimeLoop:
             artifact_refs=self._artifact_refs(session),
             final_url=self._final_url(session),
             step_count=session.step_count + 1,
-            failure_reason="Repeated action without progress.",
+            failure_reason=(
+                f"Repeated `{action.tool_name}` without progress. "
+                "The loop stopped to avoid getting stuck."
+            ),
         )
         trace_item = self.trace_recorder.record(
             step_index=step_index,
@@ -1199,6 +1203,8 @@ class RuntimeLoop:
         self,
         decision: PlannerDecision,
         observation: AgentObservation | None,
+        *,
+        session: RuntimeSession | None = None,
     ) -> PlannerDecision:
         """Validate that element targeting follows the policy.
 
@@ -1228,8 +1234,24 @@ class RuntimeLoop:
         element_id = skill_input.get("element_id")
         selector = skill_input.get("selector")
 
-        # If element_id is provided, that's correct usage
         if element_id:
+            if (
+                decision.chosen_skill == "click_element"
+                and observation is not None
+                and session is not None
+            ):
+                target_element = self._find_observed_element_by_id(observation, str(element_id))
+                if target_element and self._is_redundant_reading_click(
+                    decision,
+                    observation,
+                    target_element,
+                    session,
+                ):
+                    return PlannerDecision.safe_fail(
+                        "Redundant click on a navigation-like element after the page text "
+                        "was already extracted from the same page. Prefer finishing, "
+                        "summarizing, or a different non-click action."
+                    )
             return decision
 
         # No selector provided either - let skill validation handle this
@@ -1259,6 +1281,70 @@ class RuntimeLoop:
                 )
 
         return decision
+
+    def _find_observed_element_by_id(
+        self,
+        observation: AgentObservation,
+        element_id: str,
+    ) -> InteractiveElement | None:
+        for element in observation.interactive_elements:
+            if element.element_id == element_id:
+                return element
+        return None
+
+    def _is_redundant_reading_click(
+        self,
+        decision: PlannerDecision,
+        observation: AgentObservation,
+        element: InteractiveElement,
+        session: RuntimeSession,
+    ) -> bool:
+        planner_state = session.planner_state()
+        extracted_text = (planner_state.latest_extracted_text or "").strip()
+        if not extracted_text or planner_state.latest_extracted_text_truncated is True:
+            return False
+        if len(extracted_text) < 1200:
+            return False
+        if (
+            planner_state.latest_extracted_text_url
+            and planner_state.latest_extracted_text_url != observation.page_url
+        ):
+            return False
+
+        role = (element.role or "").lower()
+        tag = (element.tag or "").lower()
+        if role not in {"link", "button"} and tag not in {"a", "button"}:
+            return False
+
+        label = " ".join((element.text or element.label or "").split()).strip()
+        if len(label) < 4:
+            return False
+
+        rationale_text = (
+            f"{decision.rationale or ''} {decision.expected_outcome or ''}"
+        ).lower()
+        reveal_keywords = (
+            "expand",
+            "expanded",
+            "accordion",
+            "toggle",
+            "reveal",
+            "show more",
+            "раскры",
+            "развер",
+            "скрыт",
+            "показат",
+            "аккордеон",
+        )
+        if any(keyword in rationale_text for keyword in reveal_keywords):
+            return False
+
+        label_lower = label.lower()
+        text_lower = extracted_text.lower()
+        title_lower = " ".join((observation.page_title or "").split()).strip().lower()
+        if label_lower == title_lower:
+            return True
+        return label_lower in text_lower
 
     def _looks_like_generic_text_selector(self, selector: str) -> bool:
         """Check if selector appears to be a generic text-based selector."""
