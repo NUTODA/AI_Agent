@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
@@ -20,6 +22,15 @@ def utc_now() -> datetime:
     """Return a timezone-aware UTC timestamp."""
 
     return datetime.now(timezone.utc)
+
+
+def stable_snapshot_id(prefix: str, *, signature: dict[str, Any]) -> str:
+    """Build a deterministic identifier for a browser snapshot entity."""
+
+    digest = hashlib.sha1(
+        json.dumps(signature, ensure_ascii=True, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    return f"{prefix}_{digest[:12]}"
 
 
 class ElementRole(str, Enum):

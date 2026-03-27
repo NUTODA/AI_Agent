@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from browser_agent.browser.engine import BrowserOperationResult, StubBrowserEngine
-from browser_agent.browser.page_state import PageState
+from browser_agent.browser.page_state import ElementRole, InteractiveElementState, PageState
 from browser_agent.config import RuntimeSettings
 from browser_agent.llm.prompts import build_planner_context
 from browser_agent.llm.planner import PlannerDecision
@@ -103,6 +103,33 @@ class SingleActionPlanner:
         )
 
 
+class InvalidThenValidTargetingPlanner:
+    """Emit one invalid targeting decision, then recover with a valid one."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def decide(self, planner_context) -> PlannerDecision:
+        del planner_context
+        self.calls += 1
+        if self.calls == 1:
+            return act_decision(
+                skill="click_element",
+                skill_input={"selector": 'text="Buy now"'},
+                rationale="Click the observed CTA.",
+                expected_outcome="The CTA is activated.",
+                progress_assessment=PlannerProgressState.NO_PROGRESS,
+            )
+        if self.calls == 2:
+            return act_decision(
+                skill="click_element",
+                skill_input={"element_id": "element_buy_now"},
+                rationale="Retry with the observed element_id.",
+                expected_outcome="The CTA is activated.",
+            )
+        return finish_decision("Recovered from invalid targeting and completed the task.")
+
+
 class FailingClickBrowser(StubBrowserEngine):
     """Stub browser that returns a structured click failure."""
 
@@ -160,6 +187,13 @@ class ScrollingTextBrowser(StubBrowserEngine):
         )
 
 
+class BrokenObservationBrowser(StubBrowserEngine):
+    """Stub browser that raises a descriptive observation failure."""
+
+    def observe_page(self):
+        raise RuntimeError("DOM snapshot evaluation crashed")
+
+
 def build_loop(*, planner, browser, trace_dir) -> RuntimeLoop:
     return RuntimeLoop(
         planner=planner,
@@ -206,6 +240,74 @@ def test_runtime_loop_maps_browser_failure_into_structured_tool_result(tmp_path)
     assert session.latest_observation.page_title == "Dashboard"
     assert session.trace_items[0].planner_decision_type == PlannerDecisionType.ACT
     assert any(path.suffix == ".jsonl" for path in settings.trace_dir.iterdir())
+
+
+def test_runtime_loop_replans_after_recoverable_targeting_validation(tmp_path) -> None:
+    settings = RuntimeSettings(
+        trace_dir=tmp_path / "traces",
+        artifact_dir=tmp_path / "artifacts",
+        max_steps=4,
+    )
+    browser = StubBrowserEngine(
+        initial_state=PageState(
+            url="https://example.com/catalog",
+            title="Catalog",
+            summary="Catalog page.",
+            text_excerpt="Buy now button is visible.",
+            interactive_elements=[
+                InteractiveElementState(
+                    element_id="element_buy_now",
+                    name="Buy now",
+                    tag="button",
+                    role=ElementRole.BUTTON,
+                    selector='[data-testid="buy-now"]',
+                    text="Buy now",
+                    clickable=True,
+                    attributes={"data-testid": "buy-now"},
+                )
+            ],
+        )
+    )
+    session = RuntimeSession(
+        task=UserTask(request="Open the buy flow"),
+        settings=settings,
+    )
+    planner = InvalidThenValidTargetingPlanner()
+    loop = build_loop(planner=planner, browser=browser, trace_dir=settings.trace_dir)
+
+    report = loop.run(session)
+
+    assert report.status == RuntimeStatus.COMPLETED
+    assert planner.calls == 3
+    assert [action.tool_name for action in session.actions] == [
+        "click_element",
+        "finish_task",
+    ]
+    assert any(
+        "rejected by runtime validation" in line
+        for line in session.execution_history_summary
+    )
+
+
+def test_runtime_loop_surfaces_observation_failure_details(tmp_path) -> None:
+    settings = RuntimeSettings(
+        trace_dir=tmp_path / "traces",
+        artifact_dir=tmp_path / "artifacts",
+    )
+    session = RuntimeSession(
+        task=UserTask(request="Observe the page"),
+        settings=settings,
+    )
+    loop = build_loop(
+        planner=QueuePlanner([]),
+        browser=BrokenObservationBrowser(),
+        trace_dir=settings.trace_dir,
+    )
+
+    report = loop.run(session)
+
+    assert report.status == RuntimeStatus.FAILED
+    assert "DOM snapshot evaluation crashed" in (report.failure_reason or "")
 
 
 def test_runtime_loop_executes_multiple_steps_and_finishes(tmp_path) -> None:
@@ -353,6 +455,65 @@ def test_get_interactive_elements_respects_requested_max_elements(tmp_path) -> N
     assert report.status == RuntimeStatus.COMPLETED
     assert session.tool_results[0].data["elements"]
     assert len(session.tool_results[0].data["elements"]) == 40
+
+
+def test_get_interactive_elements_converts_browser_element_state_output(tmp_path) -> None:
+    settings = RuntimeSettings(
+        trace_dir=tmp_path / "traces",
+        artifact_dir=tmp_path / "artifacts",
+    )
+    session = RuntimeSession(
+        task=UserTask(request="Collect interactive elements"),
+        settings=settings,
+    )
+
+    class BrowserStateElementsBrowser(StubBrowserEngine):
+        def get_interactive_elements(self, max_elements: int = 25):
+            return [
+                InteractiveElementState(
+                    element_id="element_menu_sets",
+                    name="Наборы",
+                    tag="a",
+                    role=ElementRole.LINK,
+                    selector='a[href="/menu/nabory"]',
+                    text="Наборы",
+                    clickable=True,
+                    attributes={"href": "/menu/nabory"},
+                )
+            ][:max_elements]
+
+        def observe_page(self):
+            return PageState(
+                url="https://spb.yobidoyobi.ru/menu",
+                title="Menu",
+                summary="Menu page.",
+                text_excerpt="Menu categories are visible.",
+            )
+
+    planner = QueuePlanner(
+        [
+            act_decision(
+                skill="get_interactive_elements",
+                skill_input={"max_elements": 10},
+                rationale="Collect interactive elements.",
+                expected_outcome="The runtime captures visible controls.",
+            ),
+            finish_decision("Done."),
+        ]
+    )
+    loop = build_loop(
+        planner=planner,
+        browser=BrowserStateElementsBrowser(),
+        trace_dir=settings.trace_dir,
+    )
+
+    report = loop.run(session)
+
+    assert report.status == RuntimeStatus.COMPLETED
+    elements = session.tool_results[0].data["elements"]
+    assert len(elements) == 1
+    assert elements[0]["element_id"] == "element_menu_sets"
+    assert elements[0]["role"] == "link"
 
 
 def test_runtime_loop_transitions_to_waiting_for_confirmation_and_can_resume(

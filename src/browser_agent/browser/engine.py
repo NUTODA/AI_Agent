@@ -15,6 +15,7 @@ from browser_agent.browser.page_state import (
     FormFieldState,
     InteractiveElementState,
     PageState,
+    stable_snapshot_id,
 )
 from browser_agent.browser.selectors import (
     build_selector_candidates,
@@ -70,6 +71,14 @@ PAGE_SNAPSHOT_SCRIPT = """
   const isEnabled = (element) =>
     !element.hasAttribute("disabled") &&
     element.getAttribute("aria-disabled") !== "true";
+
+  const hasClosest = (element, selector) => {
+    try {
+      return Boolean(element.closest(selector));
+    } catch {
+      return false;
+    }
+  };
 
   const cleanObject = (value) =>
     Object.fromEntries(
@@ -217,8 +226,51 @@ PAGE_SNAPSHOT_SCRIPT = """
     "[tabindex]:not([tabindex='-1'])"
   ].join(", ");
 
+  const scoreInteractiveElement = (element, tag, role, text, ariaLabel, attrs) => {
+    let score = 0;
+    const label = normalizeText(
+      [text, ariaLabel, attrs.name, attrs.placeholder].filter(Boolean).join(" ")
+    ).toLowerCase();
+    const href = normalizeText(attrs.href);
+
+    if (tag === "a" || role === "link") {
+      score += 8;
+    }
+    if (href && !href.startsWith("#") && !href.startsWith("javascript:")) {
+      score += 12;
+    }
+    if (hasClosest(element, "main, article, [role='main']")) {
+      score += 10;
+    }
+    if (
+      hasClosest(
+        element,
+        "header, nav, footer, [role='navigation'], [role='banner'], [role='contentinfo']"
+      )
+    ) {
+      score -= 12;
+    }
+    if (text && text.length >= 18) {
+      score += 2;
+    }
+    if (attrs["data-testid"]) {
+      score += 1;
+    }
+    if (/\\+\\d+/.test(label)) {
+      score -= 4;
+    }
+    if (
+      /^(settings|tools|sign in|voice search|search by image)$/i.test(label) ||
+      /^(настройки|инструменты|войти|голосовой поиск|поиск по картинке)$/i.test(label)
+    ) {
+      score -= 6;
+    }
+    return score;
+  };
+
   const interactiveElements = [];
   const seen = new Set();
+  let discoveryIndex = 0;
   for (const element of document.querySelectorAll(candidateSelector)) {
     if (seen.has(element)) {
       continue;
@@ -233,7 +285,18 @@ PAGE_SNAPSHOT_SCRIPT = """
     const ariaLabel = normalizeText(element.getAttribute("aria-label"));
     const placeholder = normalizeText(element.getAttribute("placeholder"));
     const name = labelText(element);
+    const attrs = cleanObject({
+      id: normalizeText(element.getAttribute("id")),
+      name: normalizeText(element.getAttribute("name")),
+      "data-testid": normalizeText(element.getAttribute("data-testid")),
+      "aria-label": ariaLabel,
+      placeholder,
+      type: normalizeText(element.getAttribute("type")),
+      href: normalizeText(element.getAttribute("href"))
+    });
     interactiveElements.push({
+      _priority: scoreInteractiveElement(element, tag, role, text, ariaLabel, attrs),
+      _index: discoveryIndex++,
       name,
       tag,
       role,
@@ -245,19 +308,19 @@ PAGE_SNAPSHOT_SCRIPT = """
       enabled: isEnabled(element),
       clickable: isClickable(element, tag, role),
       input_like: isInputLike(element, tag, role),
-      attributes: cleanObject({
-        id: normalizeText(element.getAttribute("id")),
-        name: normalizeText(element.getAttribute("name")),
-        "data-testid": normalizeText(element.getAttribute("data-testid")),
-        "aria-label": ariaLabel,
-        placeholder,
-        type: normalizeText(element.getAttribute("type"))
-      })
+      attributes: attrs
     });
-    if (interactiveElements.length >= maxElements) {
-      break;
-    }
   }
+
+  interactiveElements.sort((left, right) => {
+    if (right._priority !== left._priority) {
+      return right._priority - left._priority;
+    }
+    return left._index - right._index;
+  });
+  const prioritizedInteractiveElements = interactiveElements
+    .slice(0, maxElements)
+    .map(({ _priority, _index, ...item }) => item);
 
   const formFields = [];
   for (const element of document.querySelectorAll("input, textarea, select, [contenteditable='true']")) {
@@ -302,11 +365,11 @@ PAGE_SNAPSHOT_SCRIPT = """
     url: window.location.href,
     title: document.title || "Untitled Page",
     text_excerpt: bodyText.slice(0, maxTextChars),
-    interactive_elements: interactiveElements,
+    interactive_elements: prioritizedInteractiveElements,
     form_fields: formFields,
     metadata: {
       visible_text_length: bodyText.length,
-      interactive_count: interactiveElements.length,
+      interactive_count: prioritizedInteractiveElements.length,
       form_field_count: formFields.length,
       document_ready_state: document.readyState
     }
@@ -850,6 +913,8 @@ class PlaywrightBrowserEngine:
     def get_page_state(self) -> PageState:
         """Backward-compatible alias for observation calls."""
 
+        if self._last_page_state is not None:
+            return self._last_page_state
         return self.observe_page()
 
     def get_page_text(self, max_chars: int = 4000) -> str:
@@ -1553,7 +1618,6 @@ class PlaywrightBrowserEngine:
         max_elements: int | None = None,
     ) -> PageState:
         page = self.get_page()
-        observation_errors: list[str] = []
 
         try:
             raw_snapshot = page.evaluate(
@@ -1561,15 +1625,21 @@ class PlaywrightBrowserEngine:
                 [self.max_text_chars, max_elements or self.max_interactive_elements],
             )
         except Exception as exc:
-            observation_errors.append(str(exc))
-            raw_snapshot = {
-                "url": page.url,
-                "title": page.title() if hasattr(page, "title") else "Untitled Page",
-                "text_excerpt": "",
-                "interactive_elements": [],
-                "form_fields": [],
-                "metadata": {},
-            }
+            page_url = getattr(page, "url", "about:blank")
+            try:
+                page_title = page.title()
+            except Exception:
+                page_title = "Untitled Page"
+            raise BrowserRuntimeError(
+                "page_observation_failed",
+                "Failed to observe the current page.",
+                metadata={
+                    "details": str(exc),
+                    "captured_reason": reason,
+                    "page_url": page_url,
+                    "page_title": page_title,
+                },
+            ) from exc
 
         interactive_elements = [
             self._build_interactive_element(item)
@@ -1599,7 +1669,7 @@ class PlaywrightBrowserEngine:
             ),
             interactive_elements=interactive_elements,
             form_fields=form_fields,
-            observation_errors=observation_errors,
+            observation_errors=[],
             artifact_refs=artifacts,
             metadata={
                 **raw_snapshot.get("metadata", {}),
@@ -1612,7 +1682,32 @@ class PlaywrightBrowserEngine:
 
     def _build_interactive_element(self, raw: dict[str, Any]) -> InteractiveElementState:
         role = self._map_role(raw.get("role"))
+        attributes = raw.get("attributes", {})
+        stable_attributes = {
+            key: attributes.get(key)
+            for key in (
+                "id",
+                "name",
+                "data-testid",
+                "href",
+                "type",
+                "aria-label",
+                "placeholder",
+            )
+            if attributes.get(key)
+        }
         element = InteractiveElementState(
+            element_id=raw.get("element_id")
+            or stable_snapshot_id(
+                "element",
+                signature={
+                    "selector": raw.get("selector") or "",
+                    "tag": raw.get("tag") or "div",
+                    "role": role.value,
+                    "name": raw.get("name") or raw.get("text") or "",
+                    "stable_attributes": stable_attributes,
+                },
+            ),
             name=raw.get("name") or raw.get("text") or raw.get("selector") or "element",
             tag=raw.get("tag") or "div",
             role=role,
@@ -1624,7 +1719,7 @@ class PlaywrightBrowserEngine:
             enabled=bool(raw.get("enabled", True)),
             clickable=bool(raw.get("clickable", False)),
             input_like=bool(raw.get("input_like", False)),
-            attributes=raw.get("attributes", {}),
+            attributes=attributes,
         )
         candidates = [candidate.value for candidate in build_selector_candidates(element)]
         primary_selector = candidates[0] if candidates else element.selector
@@ -1636,7 +1731,24 @@ class PlaywrightBrowserEngine:
         )
 
     def _build_form_field(self, raw: dict[str, Any]) -> FormFieldState:
+        attributes = raw.get("attributes", {})
+        stable_attributes = {
+            key: attributes.get(key)
+            for key in ("id", "name", "data-testid", "autocomplete", "type")
+            if attributes.get(key)
+        }
         return FormFieldState(
+            field_id=raw.get("field_id")
+            or stable_snapshot_id(
+                "field",
+                signature={
+                    "selector": raw.get("selector") or "",
+                    "label": raw.get("label") or "",
+                    "name": raw.get("name") or "",
+                    "field_type": raw.get("field_type") or "",
+                    "stable_attributes": stable_attributes,
+                },
+            ),
             label=raw.get("label"),
             name=raw.get("name"),
             selector=raw.get("selector") or "",
@@ -1646,7 +1758,7 @@ class PlaywrightBrowserEngine:
             filled=bool(raw.get("filled", False)),
             visible=bool(raw.get("visible", True)),
             enabled=bool(raw.get("enabled", True)),
-            attributes=raw.get("attributes", {}),
+            attributes=attributes,
         )
 
     def _map_role(self, raw_role: str | None) -> ElementRole:

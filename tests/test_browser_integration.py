@@ -37,6 +37,31 @@ HTML_FIXTURE = """
 
 FIXTURE_URL = f"data:text/html,{quote(HTML_FIXTURE)}"
 
+PRIORITIZATION_FIXTURE = """
+<!doctype html>
+<html>
+  <head>
+    <title>Prioritized Elements</title>
+  </head>
+  <body>
+    <header>
+      <button>Settings</button>
+      <button>Sign in</button>
+      <button>Tools</button>
+      <button>Voice Search</button>
+      <button>Search by image</button>
+      <button>Notifications</button>
+    </header>
+    <main>
+      <p>Search results</p>
+      <a href="https://spb.yobidoyobi.ru/nabory">Ёбидоёби - наборы роллов</a>
+    </main>
+  </body>
+</html>
+"""
+
+PRIORITIZATION_URL = f"data:text/html,{quote(PRIORITIZATION_FIXTURE)}"
+
 
 def _start_engine(tmp_path) -> PlaywrightBrowserEngine:
     engine = PlaywrightBrowserEngine(
@@ -90,5 +115,22 @@ def test_playwright_engine_can_navigate_observe_and_interact(tmp_path) -> None:
 
         assert "Clicked" in page_state.text_excerpt
         assert page_state.artifact_refs
+    finally:
+        engine.stop()
+
+
+@pytest.mark.integration
+def test_playwright_engine_prioritizes_main_links_over_header_controls(tmp_path) -> None:
+    engine = _start_engine(tmp_path)
+
+    try:
+        navigation = engine.navigate(PRIORITIZATION_URL, wait_for="load")
+        assert navigation.ok is True
+
+        elements = engine.get_interactive_elements(max_elements=3)
+        hrefs = [element.attributes.get("href") for element in elements]
+
+        assert "https://spb.yobidoyobi.ru/nabory" in hrefs
+        assert hrefs[0] == "https://spb.yobidoyobi.ru/nabory"
     finally:
         engine.stop()

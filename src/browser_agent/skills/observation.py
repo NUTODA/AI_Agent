@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from browser_agent.browser.page_state import InteractiveElementState
 from browser_agent.runtime.models import AgentObservation, InteractiveElement
 from browser_agent.skills.base import (
     BaseSkill,
@@ -78,18 +79,32 @@ class GetInteractiveElementsSkill(BaseSkill):
         payload: GetInteractiveElementsInput,
     ) -> GetInteractiveElementsOutput:
         try:
-            elements = context.browser.get_interactive_elements(
+            browser_elements = context.browser.get_interactive_elements(
                 max_elements=payload.max_elements
             )
-            page_state = context.browser.observe_page()
+            page_state = context.browser.get_page_state()
         except Exception as exc:
             raise SkillExecutionError(
                 message="Failed to collect interactive elements from the current page.",
                 error_code="get_interactive_elements_failed",
                 data={"details": str(exc)},
             ) from exc
+        raw_elements = (
+            page_state.interactive_elements[: payload.max_elements]
+            if page_state.interactive_elements
+            else browser_elements[: payload.max_elements]
+        )
+        elements: list[InteractiveElement] = []
+        for element in raw_elements[: payload.max_elements]:
+            if isinstance(element, InteractiveElement):
+                elements.append(element)
+            elif isinstance(element, InteractiveElementState):
+                elements.append(element.to_runtime_model())
+            else:
+                elements.append(InteractiveElement.model_validate(element))
         observation = page_state.to_agent_observation()
-        observation.interactive_elements = elements[: payload.max_elements]
+        if elements:
+            observation.interactive_elements = elements[: payload.max_elements]
         return GetInteractiveElementsOutput(
             elements=observation.interactive_elements[: payload.max_elements],
             observation=observation,

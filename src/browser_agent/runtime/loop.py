@@ -59,6 +59,11 @@ from browser_agent.ui.formatting import format_tool_target, summarize_skill_inpu
 class RuntimeLoop:
     """Coordinate planning, safety checks, skill execution, and reporting."""
 
+    _RECOVERABLE_VALIDATION_RATIONALE = (
+        "The proposed action is recoverable but violates runtime targeting rules. "
+        "Replan using the current observation."
+    )
+    _MAX_PLANNER_REPLAN_ATTEMPTS = 2
     _EXPLORATION_SKILLS = frozenset(
         {
             "observe_page",
@@ -352,21 +357,9 @@ class RuntimeLoop:
                     )
                     return self._finish(session, report)
                 self._emit_observation_ready(step_index, observation_before)
-                planner_context = session.build_planner_context(
-                    available_skills=self.available_skills,
-                )
-                try:
-                    decision = self.planner.decide(planner_context)
-                except Exception as exc:
-                    decision = PlannerDecision.safe_fail(
-                        f"Planner raised an unexpected exception: {exc}"
-                    )
-
-                # Validate element targeting policy
-                decision = self._validate_element_targeting(
-                    decision,
-                    observation_before,
+                decision = self._decide_with_runtime_validation(
                     session=session,
+                    observation=observation_before,
                 )
 
                 thought = decision.to_agent_thought()
@@ -1033,30 +1026,40 @@ class RuntimeLoop:
             output_payload = skill.execute(self._context(session), payload)
         except SkillExecutionError as exc:
             duration = self._elapsed_ms(step_started)
+            details = exc.data.get("details")
+            detail_suffix = (
+                f" Details: {details}"
+                if isinstance(details, str) and details
+                else ""
+            )
             self._events.emit(
                 SkillExecutionCompleted(
                     timestamp=utc_now(),
                     step_number=step_index,
                     skill_name="observe_page",
                     status=ToolExecutionStatus.ERROR.value,
-                    message=truncate_text(exc.message, 200),
+                    message=truncate_text(f"{exc.message}{detail_suffix}", 200),
                     duration_ms=duration,
                 )
             )
-            raise RuntimeError(exc.message) from exc
+            raise RuntimeError(f"{exc.message}{detail_suffix}") from exc
         except Exception as exc:
             duration = self._elapsed_ms(step_started)
+            message = (
+                "Failed to observe the current page. "
+                f"{exc.__class__.__name__}: {exc}"
+            )
             self._events.emit(
                 SkillExecutionCompleted(
                     timestamp=utc_now(),
                     step_number=step_index,
                     skill_name="observe_page",
                     status=ToolExecutionStatus.ERROR.value,
-                    message="Failed to observe the current page.",
+                    message=truncate_text(message, 200),
                     duration_ms=duration,
                 )
             )
-            raise RuntimeError("Failed to observe the current page.") from exc
+            raise RuntimeError(message) from exc
 
         output_data = output_payload.model_dump(mode="json")
         observation_payload = output_data.get("observation")
@@ -1155,13 +1158,17 @@ class RuntimeLoop:
             )
             return result
         except Exception as exc:
+            failure_message = (
+                f"Skill `{action.tool_name}` failed: "
+                f"{exc.__class__.__name__}: {exc}"
+            )
             result = ToolResult(
                 call_id=tool_call.call_id,
                 skill_name=tool_call.skill_name,
                 status=ToolExecutionStatus.ERROR,
-                message=f"Skill `{action.tool_name}` failed.",
+                message=failure_message,
                 error_code="skill_execution_error",
-                error_message=str(exc),
+                error_message=f"{exc.__class__.__name__}: {exc}",
                 duration_ms=self._elapsed_ms(step_started),
             )
             self._events.emit(
@@ -1368,6 +1375,81 @@ class RuntimeLoop:
 
         return True
 
+    def _decide_with_runtime_validation(
+        self,
+        *,
+        session: RuntimeSession,
+        observation: AgentObservation,
+    ) -> PlannerDecision:
+        planner_context = session.build_planner_context(
+            available_skills=self.available_skills,
+        )
+
+        for attempt in range(self._MAX_PLANNER_REPLAN_ATTEMPTS + 1):
+            decision = self._planner_decision_with_fallback(planner_context)
+            validated_decision = self._validate_element_targeting(
+                decision,
+                observation,
+                session=session,
+            )
+            if not self._is_recoverable_validation_failure(validated_decision):
+                return validated_decision
+
+            reason = (
+                validated_decision.failure_reason
+                or "Planner targeting validation failed."
+            )
+            session.record_history(
+                "Planner decision was rejected by runtime validation; requesting "
+                f"replan ({attempt + 1}/{self._MAX_PLANNER_REPLAN_ATTEMPTS + 1}). "
+                f"Reason: {reason}"
+            )
+            if attempt >= self._MAX_PLANNER_REPLAN_ATTEMPTS:
+                return PlannerDecision.safe_fail(
+                    (
+                        "Planner kept producing invalid element targeting after "
+                        f"{attempt + 1} attempts. Last issue: {reason}"
+                    ),
+                    rationale=self._RECOVERABLE_VALIDATION_RATIONALE,
+                )
+
+            planner_context = planner_context.model_copy(
+                update={
+                    "trace_summary": [
+                        *planner_context.trace_summary,
+                        (
+                            "Runtime validation rejected the previous planner action: "
+                            f"{reason}"
+                        ),
+                        "Choose a different action or use the observed element_id.",
+                    ]
+                }
+            )
+
+        return PlannerDecision.safe_fail(
+            "Planner could not produce a valid action after runtime validation.",
+        )
+
+    def _planner_decision_with_fallback(self, planner_context) -> PlannerDecision:
+        try:
+            return self.planner.decide(planner_context)
+        except Exception as exc:
+            return PlannerDecision.safe_fail(
+                f"Planner raised an unexpected exception: {exc}"
+            )
+
+    def _is_recoverable_validation_failure(self, decision: PlannerDecision) -> bool:
+        return (
+            decision.decision_type == PlannerDecisionType.FAIL
+            and decision.rationale == self._RECOVERABLE_VALIDATION_RATIONALE
+        )
+
+    def _recoverable_validation_fail(self, reason: str) -> PlannerDecision:
+        return PlannerDecision.safe_fail(
+            reason,
+            rationale=self._RECOVERABLE_VALIDATION_RATIONALE,
+        )
+
     def _validate_element_targeting(
         self,
         decision: PlannerDecision,
@@ -1416,7 +1498,7 @@ class RuntimeLoop:
                     target_element,
                     session,
                 ):
-                    return PlannerDecision.safe_fail(
+                    return self._recoverable_validation_fail(
                         "Redundant click on a navigation-like element after the page text "
                         "was already extracted from the same page. Prefer finishing, "
                         "summarizing, or a different non-click action."
@@ -1435,7 +1517,7 @@ class RuntimeLoop:
                     if self._selector_matches_element(selector, element):
                         # This selector matches an element that has an element_id
                         # The planner should have used element_id
-                        return PlannerDecision.safe_fail(
+                        return self._recoverable_validation_fail(
                             f"Targeting policy violation: raw selector '{selector}' "
                             f"matches observed element {element.element_id} but element_id was not used. "
                             f"When an element is in the observation, always use its element_id."
@@ -1444,7 +1526,7 @@ class RuntimeLoop:
             # Check for ambiguity (selector matches multiple elements)
             matching_count = self._count_matching_observed_elements(selector, observation)
             if matching_count > 1:
-                return PlannerDecision.safe_fail(
+                return self._recoverable_validation_fail(
                     f"Ambiguous target: selector '{selector}' matches {matching_count} elements "
                     f"in the observation. Use element_id for precise targeting."
                 )
@@ -1490,6 +1572,15 @@ class RuntimeLoop:
         label = " ".join((element.text or element.label or "").split()).strip()
         if len(label) < 4:
             return False
+        label_lower = label.lower()
+        if any(token in label_lower for token in ("http://", "https://", "www.")):
+            return False
+        if "." in label_lower and any(ch.isalpha() for ch in label_lower):
+            if " " not in label_lower or "+" in label_lower:
+                return False
+        href = str(element.attributes.get("href", "") or "").strip().lower()
+        if href and not href.startswith(("#", "javascript:")):
+            return False
 
         rationale_text = (
             f"{decision.rationale or ''} {decision.expected_outcome or ''}"
@@ -1529,7 +1620,6 @@ class RuntimeLoop:
         if not any(keyword in rationale_text for keyword in reading_keywords):
             return False
 
-        label_lower = label.lower()
         text_lower = extracted_text.lower()
         title_lower = " ".join((observation.page_title or "").split()).strip().lower()
         if label_lower == title_lower:

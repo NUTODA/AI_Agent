@@ -6,6 +6,7 @@ import sys
 from argparse import Namespace
 
 from browser_agent.cli.bootstrap import BootstrapDecision, infer_explicit_start_url
+from browser_agent.config import RuntimeSettings
 from browser_agent.cli.main import app
 
 
@@ -151,3 +152,33 @@ def test_infer_explicit_start_url_only_for_url_or_domain() -> None:
     assert infer_explicit_start_url("Найди вакансии на hh.ru") == "https://hh.ru"
     assert infer_explicit_start_url("Open https://example.com/docs please") == "https://example.com/docs"
     assert infer_explicit_start_url("Глянь лучшие суши рядом") is None
+
+
+def test_resolve_bootstrap_decision_rewrites_google_search_for_branded_task(monkeypatch) -> None:
+    from browser_agent.cli import bootstrap
+
+    monkeypatch.setattr(
+        bootstrap.BootstrapPlanner,
+        "decide",
+        lambda self, task_text: BootstrapDecision(
+            mode="search_url",
+            target_url="https://www.google.com/search?q=%D0%81%D0%B1%D0%B8%D0%B4%D0%BE%D1%91%D0%B1%D0%B8",
+            confidence=0.42,
+            reason_summary=f"Search bootstrap for {task_text}",
+        ),
+    )
+
+    decision = bootstrap.resolve_bootstrap_decision(
+        "закажи роллов в Ёбидоёби в Питере",
+        settings=RuntimeSettings(
+            planner_enabled=True,
+            planner_base_url="https://planner.example",
+            planner_model="test-model",
+        ),
+    )
+
+    assert decision is not None
+    assert decision.mode == "search_url"
+    assert decision.target_url is not None
+    assert "duckduckgo.com" in decision.target_url
+    assert "%D0%BE%D1%84%D0%B8%D1%86%D0%B8%D0%B0%D0%BB%D1%8C%D0%BD%D1%8B%D0%B9" in decision.target_url

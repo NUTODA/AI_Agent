@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from browser_agent.browser.engine import PlaywrightBrowserEngine
 from browser_agent.browser.page_state import (
     ElementRole,
     FormFieldState,
@@ -65,3 +66,32 @@ def test_page_state_to_agent_observation_preserves_browser_summary_fields() -> N
     assert observation.interactive_elements[0].is_clickable is True
     assert observation.form_fields[0].placeholder == "Email address"
     assert observation.form_fields[0].required is True
+
+
+def test_engine_builds_stable_snapshot_ids_for_same_element_signature() -> None:
+    engine = PlaywrightBrowserEngine()
+
+    raw_element = {
+        "name": "Buy now",
+        "tag": "button",
+        "role": "button",
+        "selector": '[data-testid="buy-now"]',
+        "text": "Buy now",
+        "clickable": True,
+        "attributes": {"data-testid": "buy-now"},
+    }
+    raw_field = {
+        "label": "Email",
+        "name": "email",
+        "selector": 'input[name="email"]',
+        "field_type": "email",
+        "attributes": {"name": "email", "type": "email"},
+    }
+
+    first_element = engine._build_interactive_element(raw_element)
+    second_element = engine._build_interactive_element(raw_element)
+    first_field = engine._build_form_field(raw_field)
+    second_field = engine._build_form_field(raw_field)
+
+    assert first_element.element_id == second_element.element_id
+    assert first_field.field_id == second_field.field_id

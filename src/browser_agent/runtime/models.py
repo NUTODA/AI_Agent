@@ -54,6 +54,10 @@ class ToolExecutionStatus(str, Enum):
     SKIPPED = "skipped"
 
 
+# Backward-compatible alias kept for older tests and trace helpers.
+ToolResultStatus = ToolExecutionStatus
+
+
 class PlannerDecisionType(str, Enum):
     """The only planner decisions the runtime understands."""
 
