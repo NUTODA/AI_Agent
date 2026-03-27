@@ -84,6 +84,7 @@ source .venv/bin/activate
 pip install -e .[dev]
 python -m playwright install chromium
 browser-agent "Review my inbox for spam"
+browser-agent Review my inbox for spam
 ```
 
 You can also pass flags. The default step cap is **80** (suited to multi-page research); use `--max-steps` for shorter smoke tests:
@@ -93,7 +94,7 @@ browser-agent run --headed --start-url https://example.com --max-steps 12 "Inspe
 browser-agent --capture-screenshots --start-url https://example.com --json "Observe the current page"
 ```
 
-Bare task text is still supported (`browser-agent "task"`) and is treated as `browser-agent run`.
+Bare task text is the default launch mode and is treated as `browser-agent run`.
 
 ### Agent Console UI (`--ui`)
 

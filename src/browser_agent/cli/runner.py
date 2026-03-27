@@ -41,7 +41,11 @@ def build_run_parser() -> argparse.ArgumentParser:
         ),
         add_help=True,
     )
-    parser.add_argument("task", nargs="?", help="Natural-language task to run.")
+    parser.add_argument(
+        "task",
+        nargs="*",
+        help="Natural-language task to run.",
+    )
     parser.add_argument("--start-url", help="Optional starting URL for the session.")
     parser.add_argument(
         "--max-steps",
@@ -91,7 +95,10 @@ def parse_run_args(argv: Sequence[str] | None) -> Namespace:
     """Parse run-mode argv."""
 
     parser = build_run_parser()
-    return parser.parse_args(list(argv) if argv is not None else None)
+    values = list(argv) if argv is not None else None
+    if hasattr(parser, "parse_intermixed_args"):
+        return parser.parse_intermixed_args(values)
+    return parser.parse_args(values)
 
 
 def run_cli_from_args(args: Namespace, *, task_override: str | None = None) -> FinalReport:
@@ -108,7 +115,7 @@ def run_cli_from_args(args: Namespace, *, task_override: str | None = None) -> F
         )
         return report
 
-    task_text = task_override if task_override is not None else (args.task or input("Task> ").strip())
+    task_text = task_override if task_override is not None else (" ".join(args.task).strip() or input("Task> ").strip())
     settings = RuntimeSettings.from_env()
     if args.max_steps is not None:
         settings = settings.model_copy(update={"max_steps": args.max_steps})
