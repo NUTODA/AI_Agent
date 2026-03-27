@@ -74,11 +74,8 @@ PLANNER_SYSTEM_PROMPT = dedent(
     2. Only use the selector field as a fallback when:
        - The element is NOT present in the current observation
        - You need to interact with an element that wasn't captured
-    3. NEVER use generic text selectors (text="...") for repeated controls like:
-       - "Mark Spam" buttons in email lists
-       - "Add to Cart" buttons on product listing pages
-       - "Delete" buttons in table rows
-       These are ambiguous and will click the wrong element.
+    3. NEVER use generic text selectors (text="...") for repeated controls that appear
+       multiple times on the same page. These are ambiguous and can click the wrong element.
     4. NEVER use unsupported jQuery-style selectors like :contains()
     5. Playwright selector formats: CSS selectors, text="exact text", role=button[name="label"]
 

@@ -75,7 +75,7 @@ class ClickElementInput(BaseModel):
     )
     selector: str | None = Field(
         default=None,
-        description="FALLBACK ONLY: CSS or Playwright selector. Only use when element_id is not in observation. Avoid generic text selectors like text='Mark Spam' for repeated controls - they are ambiguous.",
+        description="FALLBACK ONLY: CSS or Playwright selector. Only use when element_id is not in observation. Avoid generic text selectors for repeated controls because they are ambiguous.",
     )
     element_name: str | None = Field(
         default=None,
