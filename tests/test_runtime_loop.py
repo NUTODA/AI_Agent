@@ -13,6 +13,7 @@ from browser_agent.runtime.loop import RuntimeLoop
 from browser_agent.runtime.models import (
     AgentAction,
     AgentObservation,
+    FormFieldSummary,
     InteractiveElement,
     HumanInterventionKind,
     PlannerDecisionType,
@@ -177,6 +178,46 @@ class RepeatedElementScanThenFinishPlanner:
         return finish_decision("The existing observation already had the needed controls.")
 
 
+class RedundantSearchRefinementThenFinishPlanner:
+    """Try an unnecessary search input after extraction, then finish on replan."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def decide(self, planner_context) -> PlannerDecision:
+        del planner_context
+        self.calls += 1
+        if self.calls == 1:
+            return act_decision(
+                skill="type_text",
+                skill_input={"field_id": "field_search", "text": "мини"},
+                rationale="Use the page search to narrow the visible sets under the budget.",
+                expected_outcome="Only the cheapest relevant sets remain visible.",
+                progress_assessment=PlannerProgressState.NO_PROGRESS,
+            )
+        return finish_decision("The extracted listing already contains enough budget options.")
+
+
+class RedundantSortRefinementThenFinishPlanner:
+    """Try an unnecessary sort click after extraction, then finish on replan."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def decide(self, planner_context) -> PlannerDecision:
+        del planner_context
+        self.calls += 1
+        if self.calls == 1:
+            return act_decision(
+                skill="click_element",
+                skill_input={"element_id": "element_sort_price"},
+                rationale="Sort the sets by best price to make the answer easier to read.",
+                expected_outcome="The list is reordered by price.",
+                progress_assessment=PlannerProgressState.NO_PROGRESS,
+            )
+        return finish_decision("The extracted listing already contains enough priced options.")
+
+
 class FailingClickBrowser(StubBrowserEngine):
     """Stub browser that returns a structured click failure."""
 
@@ -336,7 +377,7 @@ def test_runtime_loop_replans_after_recoverable_targeting_validation(tmp_path) -
     )
 
 
-def test_runtime_loop_replans_after_redundant_exploration_validation(tmp_path) -> None:
+def test_runtime_loop_auto_finishes_after_redundant_exploration_validation(tmp_path) -> None:
     settings = RuntimeSettings(
         trace_dir=tmp_path / "traces",
         artifact_dir=tmp_path / "artifacts",
@@ -393,13 +434,13 @@ def test_runtime_loop_replans_after_redundant_exploration_validation(tmp_path) -
     report = loop.run(session)
 
     assert report.status == RuntimeStatus.COMPLETED
-    assert planner.calls == 2
+    assert planner.calls == 1
     assert [action.tool_name for action in session.actions] == [
         "extract_page_text",
         "finish_task",
     ]
     assert any(
-        "rejected by runtime validation" in line
+        "converting the rejected planner action into finish" in line
         and "multiple price or value mentions" in line
         for line in session.execution_history_summary
     )
@@ -498,6 +539,174 @@ def test_runtime_loop_replans_after_repeated_get_interactive_elements(tmp_path) 
         "rejected by runtime validation" in line
         and "already includes the result of the most recent `get_interactive_elements` call"
         in line
+        for line in session.execution_history_summary
+    )
+
+
+def test_runtime_loop_auto_finishes_after_redundant_search_refinement(tmp_path) -> None:
+    settings = RuntimeSettings(
+        trace_dir=tmp_path / "traces",
+        artifact_dir=tmp_path / "artifacts",
+        max_steps=4,
+    )
+    browser = StubBrowserEngine(
+        initial_state=PageState(
+            url="https://example.com/menu/nabory",
+            title="Наборы",
+            summary="Listing page with visible sets.",
+            text_excerpt="Visible sets and prices.",
+        )
+    )
+    session = RuntimeSession(
+        task=UserTask(request="Глянь сеты роллов до 1500 ₽"),
+        settings=settings,
+    )
+    session.add_observation(
+        AgentObservation(
+            page_url="https://example.com/menu/nabory",
+            page_title="Наборы",
+            summary="Listing page with visible sets.",
+            visible_text_excerpt="Visible sets and prices.",
+            form_fields=[
+                FormFieldSummary(
+                    field_id="field_search",
+                    label="Искать блюда",
+                    selector='input[name="search"]',
+                    field_type="text",
+                )
+            ],
+        )
+    )
+    session.add_action(
+        AgentAction(
+            tool_name="extract_page_text",
+            rationale="Read the listing text.",
+            parameters={"max_chars": 4000},
+            expected_outcome="Capture the visible listing text.",
+        )
+    )
+    session.add_tool_result(
+        ToolResult(
+            call_id="call_existing_extract",
+            skill_name="extract_page_text",
+            status=ToolExecutionStatus.SUCCESS,
+            message="Skill `extract_page_text` completed successfully.",
+            data={
+                "text": (
+                    "Филяй 1 499 ₽. Ёби Хит Комбо 1 349 ₽. Химицу 1 349 ₽. "
+                    "Табэ Сусу 1 485 ₽."
+                ),
+                "truncated": False,
+                "page_url": "https://example.com/menu/nabory",
+            },
+            duration_ms=8,
+        )
+    )
+    planner = RedundantSearchRefinementThenFinishPlanner()
+    loop = build_loop(planner=planner, browser=browser, trace_dir=settings.trace_dir)
+
+    report = loop.run(session)
+
+    assert report.status == RuntimeStatus.COMPLETED
+    assert planner.calls == 1
+    assert [action.tool_name for action in session.actions] == [
+        "extract_page_text",
+        "finish_task",
+    ]
+    assert any(
+        "converting the rejected planner action into finish" in line
+        and "search or filter input" in line
+        for line in session.execution_history_summary
+    )
+
+
+def test_runtime_loop_auto_finishes_after_redundant_sort_refinement(tmp_path) -> None:
+    settings = RuntimeSettings(
+        trace_dir=tmp_path / "traces",
+        artifact_dir=tmp_path / "artifacts",
+        max_steps=4,
+    )
+    browser = StubBrowserEngine(
+        initial_state=PageState(
+            url="https://example.com/menu/nabory",
+            title="Наборы",
+            summary="Listing page with visible sets.",
+            text_excerpt="Visible sets and prices.",
+            interactive_elements=[
+                InteractiveElementState(
+                    element_id="element_sort_price",
+                    name="Лучшая цена без скидок",
+                    tag="button",
+                    role=ElementRole.BUTTON,
+                    selector='button[data-sort="price"]',
+                    text="Лучшая цена без скидок",
+                    clickable=True,
+                )
+            ],
+        )
+    )
+    session = RuntimeSession(
+        task=UserTask(request="Глянь сеты роллов до 1500 ₽"),
+        settings=settings,
+    )
+    session.add_observation(
+        AgentObservation(
+            page_url="https://example.com/menu/nabory",
+            page_title="Наборы",
+            summary="Listing page with visible sets.",
+            visible_text_excerpt="Visible sets and prices.",
+            interactive_elements=[
+                InteractiveElement(
+                    element_id="element_sort_price",
+                    label="Лучшая цена без скидок",
+                    tag="button",
+                    role="button",
+                    selector='button[data-sort="price"]',
+                    text="Лучшая цена без скидок",
+                    is_clickable=True,
+                )
+            ],
+        )
+    )
+    session.add_action(
+        AgentAction(
+            tool_name="extract_page_text",
+            rationale="Read the listing text.",
+            parameters={"max_chars": 4000},
+            expected_outcome="Capture the visible listing text.",
+        )
+    )
+    session.add_tool_result(
+        ToolResult(
+            call_id="call_existing_extract",
+            skill_name="extract_page_text",
+            status=ToolExecutionStatus.SUCCESS,
+            message="Skill `extract_page_text` completed successfully.",
+            data={
+                "text": (
+                    "Филяй 1 499 ₽. Ёби Хит Комбо 1 349 ₽. Химицу 1 349 ₽. "
+                    "Табэ Сусу 1 485 ₽."
+                ),
+                "truncated": False,
+                "page_url": "https://example.com/menu/nabory",
+            },
+            duration_ms=8,
+        )
+    )
+    planner = RedundantSortRefinementThenFinishPlanner()
+    loop = build_loop(planner=planner, browser=browser, trace_dir=settings.trace_dir)
+
+    report = loop.run(session)
+
+    assert report.status == RuntimeStatus.COMPLETED
+    assert planner.calls == 1
+    assert [action.tool_name for action in session.actions] == [
+        "extract_page_text",
+        "finish_task",
+    ]
+    assert any(
+        "converting the rejected planner action into finish" in line
+        and "sort, filter, or search" in line
         for line in session.execution_history_summary
     )
 

@@ -1421,6 +1421,18 @@ class RuntimeLoop:
                 validated_decision.failure_reason
                 or "Planner targeting validation failed."
             )
+            auto_finish_decision = self._maybe_finish_after_validation_failure(
+                session=session,
+                observation=observation,
+                reason=reason,
+            )
+            if auto_finish_decision is not None:
+                session.record_history(
+                    "Runtime validation determined the current page already has enough "
+                    "evidence; converting the rejected planner action into finish. "
+                    f"Reason: {reason}"
+                )
+                return auto_finish_decision
             session.record_history(
                 "Planner decision was rejected by runtime validation; requesting "
                 f"replan ({attempt + 1}/{self._MAX_PLANNER_REPLAN_ATTEMPTS + 1}). "
@@ -1452,6 +1464,45 @@ class RuntimeLoop:
             "Planner could not produce a valid action after runtime validation.",
         )
 
+    def _maybe_finish_after_validation_failure(
+        self,
+        *,
+        session: RuntimeSession,
+        observation: AgentObservation,
+        reason: str,
+    ) -> PlannerDecision | None:
+        reason_lower = reason.lower()
+        if "enough extracted evidence to answer" in reason_lower:
+            return self._auto_finish_with_collected_evidence()
+        if (
+            "multiple price or value mentions" in reason_lower
+            and self._task_looks_information_seeking(session.task.request)
+            and self._has_same_page_rich_price_evidence(session, observation)
+        ):
+            return self._auto_finish_with_collected_evidence()
+        if (
+            "non-truncated page text was already extracted from the same page" in reason_lower
+            and self._task_looks_information_seeking(session.task.request)
+            and self._has_same_page_rich_price_evidence(session, observation)
+        ):
+            return self._auto_finish_with_collected_evidence()
+        return None
+
+    def _auto_finish_with_collected_evidence(self) -> PlannerDecision:
+        return PlannerDecision(
+            decision_type=PlannerDecisionType.FINISH,
+            rationale=(
+                "Runtime validation determined that the current page already contains "
+                "enough evidence to answer honestly without another browser step."
+            ),
+            finish_reason=(
+                "The current page already contains enough evidence to answer the task, "
+                "so the runtime is finishing instead of taking another refinement step."
+            ),
+            completion_confidence=0.9,
+            progress_assessment=PlannerProgressState.SUBSTANTIAL_PROGRESS,
+        )
+
     def _planner_decision_with_fallback(self, planner_context) -> PlannerDecision:
         try:
             return self.planner.decide(planner_context)
@@ -1480,6 +1531,13 @@ class RuntimeLoop:
         session: RuntimeSession | None = None,
     ) -> PlannerDecision:
         decision = self._validate_element_targeting(
+            decision,
+            observation,
+            session=session,
+        )
+        if self._is_recoverable_validation_failure(decision):
+            return decision
+        decision = self._validate_redundant_information_refinement(
             decision,
             observation,
             session=session,
@@ -1638,6 +1696,55 @@ class RuntimeLoop:
 
         return decision
 
+    def _validate_redundant_information_refinement(
+        self,
+        decision: PlannerDecision,
+        observation: AgentObservation | None,
+        *,
+        session: RuntimeSession | None = None,
+    ) -> PlannerDecision:
+        if decision.decision_type not in {
+            PlannerDecisionType.ACT,
+            PlannerDecisionType.REQUEST_CONFIRMATION,
+        }:
+            return decision
+        if decision.chosen_skill not in {"click_element", "type_text", "select_option"}:
+            return decision
+        if observation is None or session is None:
+            return decision
+        if not self._task_looks_information_seeking(session.task.request):
+            return decision
+        if not self._has_same_page_rich_price_evidence(session, observation):
+            return decision
+
+        target_context = self._describe_interaction_target(
+            decision=decision,
+            observation=observation,
+        )
+        if not target_context:
+            return decision
+
+        if (
+            decision.chosen_skill == "type_text"
+            and self._looks_like_search_or_filter_entry(target_context)
+        ):
+            return self._recoverable_validation_fail(
+                "The current page already contains enough extracted evidence to answer "
+                "the information request. Do not use a search or filter input on the "
+                "same listing just to refine the results; prefer finishing with the "
+                "evidence already collected."
+            )
+
+        if self._looks_like_listing_refinement_control(target_context):
+            return self._recoverable_validation_fail(
+                "The current page already contains enough extracted evidence to answer "
+                "the information request. Do not click sort, filter, or search "
+                "refinement controls on the same listing; prefer finishing with the "
+                "evidence already collected."
+            )
+
+        return decision
+
     def _count_currency_mentions(self, text: str) -> int:
         import re
 
@@ -1742,6 +1849,174 @@ class RuntimeLoop:
         if label_lower == title_lower:
             return True
         return label_lower in text_lower
+
+    def _task_looks_information_seeking(self, request: str) -> bool:
+        request_lower = request.lower()
+        info_keywords = (
+            "find",
+            "look up",
+            "show",
+            "list",
+            "compare",
+            "which",
+            "what",
+            "review",
+            "inspect",
+            "глянь",
+            "найд",
+            "поищ",
+            "посмотр",
+            "покаж",
+            "спис",
+            "сравн",
+            "какие",
+            "какой",
+            "что",
+            "сколько",
+            "до ",
+            "under ",
+            "budget",
+            "cheapest",
+            "price",
+            "цена",
+            "дешев",
+        )
+        return any(keyword in request_lower for keyword in info_keywords)
+
+    def _has_same_page_rich_price_evidence(
+        self,
+        session: RuntimeSession,
+        observation: AgentObservation,
+    ) -> bool:
+        planner_state = session.planner_state()
+        extracted_text = (planner_state.latest_extracted_text or "").strip()
+        if not extracted_text or planner_state.latest_extracted_text_truncated is True:
+            return False
+        if (
+            planner_state.latest_extracted_text_url
+            and planner_state.latest_extracted_text_url != observation.page_url
+        ):
+            return False
+        return self._count_currency_mentions(extracted_text) >= 3
+
+    def _describe_interaction_target(
+        self,
+        *,
+        decision: PlannerDecision,
+        observation: AgentObservation,
+    ) -> str:
+        skill_input = decision.skill_input or {}
+        parts: list[str] = []
+
+        element_id = skill_input.get("element_id")
+        if isinstance(element_id, str) and element_id:
+            element = self._find_observed_element_by_id(observation, element_id)
+            if element is not None:
+                parts.extend(
+                    [
+                        element.label,
+                        element.text or "",
+                        element.aria_label or "",
+                        element.placeholder or "",
+                        element.selector,
+                    ]
+                )
+
+        field_id = skill_input.get("field_id")
+        if isinstance(field_id, str) and field_id:
+            field = self._find_observed_field_by_id(observation, field_id)
+            if field is not None:
+                parts.extend(
+                    [
+                        field.label or "",
+                        field.name or "",
+                        field.placeholder or "",
+                        field.selector,
+                    ]
+                )
+
+        selector = skill_input.get("selector")
+        if isinstance(selector, str) and selector:
+            parts.append(selector)
+            field = self._find_observed_field_by_selector(observation, selector)
+            if field is not None:
+                parts.extend(
+                    [
+                        field.label or "",
+                        field.name or "",
+                        field.placeholder or "",
+                    ]
+                )
+
+        option_text = skill_input.get("option_text")
+        option_value = skill_input.get("option_value")
+        if isinstance(option_text, str) and option_text:
+            parts.append(option_text)
+        if isinstance(option_value, str) and option_value:
+            parts.append(option_value)
+
+        parts.extend([decision.rationale or "", decision.expected_outcome or ""])
+        return " ".join(part for part in parts if part).lower()
+
+    def _find_observed_field_by_id(
+        self,
+        observation: AgentObservation,
+        field_id: str,
+    ):
+        for field in observation.form_fields:
+            if field.field_id == field_id:
+                return field
+        return None
+
+    def _find_observed_field_by_selector(
+        self,
+        observation: AgentObservation,
+        selector: str,
+    ):
+        for field in observation.form_fields:
+            if field.selector == selector:
+                return field
+        return None
+
+    def _looks_like_search_or_filter_entry(self, text: str) -> bool:
+        keywords = (
+            "search",
+            "find",
+            "query",
+            "filter",
+            "искать",
+            "поиск",
+            "найти",
+            "фильтр",
+        )
+        return any(keyword in text for keyword in keywords)
+
+    def _looks_like_listing_refinement_control(self, text: str) -> bool:
+        keywords = (
+            "search",
+            "find",
+            "query",
+            "filter",
+            "sort",
+            "price",
+            "best price",
+            "low to high",
+            "high to low",
+            "cheap",
+            "cheapest",
+            "искать",
+            "поиск",
+            "найти",
+            "фильтр",
+            "сорт",
+            "цена",
+            "лучшая цена",
+            "дешев",
+            "дорог",
+            "новин",
+            "популяр",
+        )
+        return any(keyword in text for keyword in keywords)
 
     def _looks_like_generic_text_selector(self, selector: str) -> bool:
         """Check if selector appears to be a generic text-based selector."""

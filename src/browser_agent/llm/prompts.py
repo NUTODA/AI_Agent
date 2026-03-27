@@ -32,6 +32,13 @@ PLANNER_SYSTEM_PROMPT = dedent(
       a sensitive page state, use ask_user with a concrete instruction for that manual browser step.
     - Request confirmation before risky or destructive actions.
     - Finish only when the task is sufficiently supported by observed evidence.
+    - If the current observation or latest extracted page text already contains enough
+      concrete facts to answer the user (for example item names, prices, dates, rankings,
+      or a short list that satisfies the user's filter), finish instead of taking another
+      browsing step.
+    - Do not use on-page search, sorting, filtering, or other refinement controls just
+      to get a nicer or more compact answer when the currently observed page already
+      supports the answer honestly.
     - progress_assessment must be exactly one of: unknown, no_progress, partial_progress,
       substantial_progress (snake_case; no other strings).
     - `extract_page_text` already returns readable text from the current page body, not just
@@ -45,6 +52,11 @@ PLANNER_SYSTEM_PROMPT = dedent(
       page-title, or sidebar controls just to "read more" if extract_page_text already captured
       the needed text from the same page. Only click when you have evidence the action will reveal
       genuinely hidden content (for example an accordion, collapsed section, or modal).
+    - On catalog, listing, menu, or search-result pages: once the same-page extracted text
+      already contains multiple relevant candidates and the user asked for information
+      (for example "find items under X", "which options are available", or "what is the
+      cheapest"), prefer finish. Do not keep searching, sorting, or filtering unless the
+      needed evidence is still missing.
     - If the recent steps are repeating read-only exploration on the same page
       (especially scroll_viewport + extract_page_text), do not continue the same pattern.
       Either finish with the evidence already collected, use a genuinely different action,
