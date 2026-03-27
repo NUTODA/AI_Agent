@@ -1358,6 +1358,8 @@ class RuntimeLoop:
     ) -> bool:
         if action.tool_name not in self._EXPLORATION_SKILLS:
             return False
+        if session.no_progress_streak < 2:
+            return False
 
         recent_actions = [item.tool_name for item in session.actions[-5:]] + [action.tool_name]
         if len(recent_actions) < 6:

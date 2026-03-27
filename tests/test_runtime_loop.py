@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
 from browser_agent.browser.engine import BrowserOperationResult, StubBrowserEngine
 from browser_agent.browser.page_state import ElementRole, InteractiveElementState, PageState
 from browser_agent.config import RuntimeSettings
@@ -9,6 +11,7 @@ from browser_agent.llm.prompts import build_planner_context
 from browser_agent.llm.planner import PlannerDecision
 from browser_agent.runtime.loop import RuntimeLoop
 from browser_agent.runtime.models import (
+    AgentAction,
     AgentObservation,
     InteractiveElement,
     HumanInterventionKind,
@@ -700,57 +703,146 @@ def test_runtime_loop_stops_repetitive_exploration_loop_even_with_text_changes(t
         task=UserTask(request="Find the weekly weather forecast"),
         settings=settings,
     )
-    planner = QueuePlanner(
+    session.no_progress_streak = 2
+    session.actions.extend(
         [
-            act_decision(
-                skill="scroll_viewport",
-                skill_input={"direction": "down", "amount": 900},
+            AgentAction(
+                tool_name="scroll_viewport",
                 rationale="Scroll for the forecast block.",
-                expected_outcome="A lower section of the page becomes available.",
+                parameters={"direction": "down", "amount": 900},
+                expected_outcome="A lower section becomes available.",
             ),
-            act_decision(
-                skill="extract_page_text",
-                skill_input={"max_chars": 500},
-                rationale="Read the page again after scrolling.",
-                expected_outcome="The runtime captures more readable text.",
+            AgentAction(
+                tool_name="extract_page_text",
+                rationale="Read after scrolling.",
+                parameters={"max_chars": 500},
+                expected_outcome="Capture more readable text.",
             ),
-            act_decision(
-                skill="scroll_viewport",
-                skill_input={"direction": "down", "amount": 900},
-                rationale="Scroll again for the forecast block.",
-                expected_outcome="A lower section of the page becomes available.",
+            AgentAction(
+                tool_name="scroll_viewport",
+                rationale="Scroll again.",
+                parameters={"direction": "down", "amount": 900},
+                expected_outcome="A lower section becomes available.",
             ),
-            act_decision(
-                skill="extract_page_text",
-                skill_input={"max_chars": 500},
-                rationale="Read the page again after scrolling.",
-                expected_outcome="The runtime captures more readable text.",
+            AgentAction(
+                tool_name="extract_page_text",
+                rationale="Read after scrolling again.",
+                parameters={"max_chars": 500},
+                expected_outcome="Capture more readable text.",
             ),
-            act_decision(
-                skill="scroll_viewport",
-                skill_input={"direction": "down", "amount": 900},
-                rationale="Scroll again for the forecast block.",
-                expected_outcome="A lower section of the page becomes available.",
-            ),
-            act_decision(
-                skill="extract_page_text",
-                skill_input={"max_chars": 500},
-                rationale="Read the page again after scrolling.",
-                expected_outcome="The runtime captures more readable text.",
+            AgentAction(
+                tool_name="scroll_viewport",
+                rationale="Scroll again.",
+                parameters={"direction": "down", "amount": 900},
+                expected_outcome="A lower section becomes available.",
             ),
         ]
     )
+    session.trace_items.extend(
+        [MagicMock(current_url="https://example.com/weather") for _ in range(5)]
+    )
     loop = build_loop(
-        planner=planner,
+        planner=QueuePlanner([]),
         browser=ScrollingTextBrowser(),
         trace_dir=settings.trace_dir,
     )
 
-    report = loop.run(session)
+    should_stop = loop._is_repetitive_exploration_loop(
+        action=AgentAction(
+            tool_name="extract_page_text",
+            rationale="Read after another scroll.",
+            parameters={"max_chars": 500},
+            expected_outcome="Capture more readable text.",
+        ),
+        session=session,
+        current_observation=AgentObservation(
+            page_url="https://example.com/weather",
+            page_title="Weather",
+            summary="Weather page with repetitive exploration.",
+            visible_text_excerpt="Chunk 6",
+        ),
+    )
 
-    assert report.status == RuntimeStatus.FAILED
-    assert "repeatedly" in report.summary.lower()
-    assert session.step_count == 6
+    assert should_stop is True
+
+
+def test_repetitive_exploration_loop_requires_stagnation(tmp_path) -> None:
+    settings = RuntimeSettings(
+        trace_dir=tmp_path / "traces",
+        artifact_dir=tmp_path / "artifacts",
+        max_steps=12,
+    )
+    session = RuntimeSession(
+        task=UserTask(request="Find affordable sets"),
+        settings=settings,
+    )
+    session.no_progress_streak = 0
+    session.actions.extend(
+        [
+            AgentAction(
+                tool_name="extract_page_text",
+                rationale="Read visible text.",
+                parameters={"max_chars": 12000},
+                expected_outcome="Capture visible text.",
+            ),
+            AgentAction(
+                tool_name="extract_page_text",
+                rationale="Read more text.",
+                parameters={"max_chars": 12000},
+                expected_outcome="Capture more text.",
+            ),
+            AgentAction(
+                tool_name="get_interactive_elements",
+                rationale="Inspect visible controls.",
+                parameters={"max_elements": 120},
+                expected_outcome="Capture controls.",
+            ),
+            AgentAction(
+                tool_name="scroll_viewport",
+                rationale="Reveal more content.",
+                parameters={"direction": "down", "amount": 1400},
+                expected_outcome="Reveal more content.",
+            ),
+            AgentAction(
+                tool_name="extract_page_text",
+                rationale="Read newly revealed content.",
+                parameters={"max_chars": 12000},
+                expected_outcome="Capture newly revealed text.",
+            ),
+        ]
+    )
+    session.trace_items.extend(
+        [
+            MagicMock(current_url="https://spb.yobidoyobi.ru/menu/nabory"),
+            MagicMock(current_url="https://spb.yobidoyobi.ru/menu/nabory"),
+            MagicMock(current_url="https://spb.yobidoyobi.ru/menu/nabory"),
+            MagicMock(current_url="https://spb.yobidoyobi.ru/menu/nabory"),
+            MagicMock(current_url="https://spb.yobidoyobi.ru/menu/nabory"),
+        ]
+    )
+    loop = build_loop(
+        planner=QueuePlanner([]),
+        browser=StubBrowserEngine(),
+        trace_dir=settings.trace_dir,
+    )
+
+    should_stop = loop._is_repetitive_exploration_loop(
+        action=AgentAction(
+            tool_name="get_interactive_elements",
+            rationale="Inspect controls after scroll revealed more products.",
+            parameters={"max_elements": 120},
+            expected_outcome="Capture controls on the newly visible portion.",
+        ),
+        session=session,
+        current_observation=AgentObservation(
+            page_url="https://spb.yobidoyobi.ru/menu/nabory",
+            page_title="Наборы",
+            summary="Sets page with new content after scroll.",
+            visible_text_excerpt="New products became visible after scroll.",
+        ),
+    )
+
+    assert should_stop is False
 
 
 def test_planner_context_includes_latest_extracted_text(tmp_path) -> None:
