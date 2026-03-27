@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from rich.console import Console
+
 from browser_agent.config import RuntimeSettings
-from browser_agent.runtime.models import UserTask
+from browser_agent.runtime.models import FinalReport, RuntimeStatus, UserTask
 from browser_agent.runtime.session import RuntimeSession
+from browser_agent.ui.events import AgentRunCompleted
 from browser_agent.ui.console import AgentConsoleApp, blocking_prompt_with_live
 
 
@@ -68,3 +71,45 @@ def test_blocking_prompt_with_live_starts_live_even_if_fn_raises() -> None:
 
     assert live.start_calls == 1
     assert app._live is live
+
+
+def test_run_interactive_loop_prints_user_facing_final_answer() -> None:
+    settings = RuntimeSettings()
+    session = RuntimeSession(
+        task=UserTask(request="Find sushi sets", start_url=None),
+        settings=settings,
+    )
+    app = AgentConsoleApp(session, settings)
+    app.console = Console(record=True, width=100, legacy_windows=False)
+
+    report = FinalReport(
+        session_id=session.session_id,
+        status=RuntimeStatus.COMPLETED,
+        summary="Collected the matching sushi sets.",
+        completed=True,
+        step_count=2,
+        completion_reason="Found 3 sushi sets in Saint Petersburg under 1500 RUB.",
+    )
+    session.complete(report)
+
+    class _Loop:
+        def run(self, _session: RuntimeSession) -> FinalReport:
+            app.emit(
+                AgentRunCompleted(
+                    timestamp=report.generated_at,
+                    status=report.status.value,
+                    summary=report.summary,
+                    step_count=report.step_count,
+                    trace_refs=(),
+                    artifact_refs=(),
+                    final_url=None,
+                )
+            )
+            return report
+
+    app.run_interactive_loop(_Loop())
+    text = app.console.export_text()
+
+    assert "Assistant" in text
+    assert "Found 3 sushi sets in Saint Petersburg under 1500 RUB." in text
+    assert "Run summary" in text

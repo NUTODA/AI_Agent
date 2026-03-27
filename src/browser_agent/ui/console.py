@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Callable, TypeVar
 from rich.console import Console
 from rich.live import Live
 from rich.markup import escape
+from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
 from rich.rule import Rule
 
@@ -165,6 +166,32 @@ def _print_pending_human_intervention(
     if resume_hint:
         console.print(f"\n[bold]Resume:[/] {escape(resume_hint)}")
     console.print()
+
+
+def _print_final_agent_response(console: Console, report: FinalReport) -> None:
+    """Show the user-facing final answer separately from the technical run summary."""
+    message = (
+        (report.completion_reason or "").strip()
+        or (report.summary or "").strip()
+        or (report.failure_reason or "").strip()
+    )
+    if not message:
+        return
+    title = "Assistant"
+    style = "cyan"
+    if report.status == RuntimeStatus.FAILED:
+        title = "Assistant (failed)"
+        style = "red"
+    elif report.status == RuntimeStatus.STOPPED:
+        title = "Assistant (partial)"
+        style = "yellow"
+    console.print(
+        Panel(
+            escape(message),
+            title=f"[bold]{title}[/]",
+            border_style=style,
+        )
+    )
 
 
 class AgentConsoleApp:
@@ -696,6 +723,13 @@ class AgentConsoleApp:
         if self.state.show_final_summary and self.state.final_summary_lines:
             if not use_alt and self.console.is_terminal:
                 self.console.clear(home=True)
+            if report.status in {
+                RuntimeStatus.COMPLETED,
+                RuntimeStatus.STOPPED,
+                RuntimeStatus.FAILED,
+            }:
+                self.console.print()
+                _print_final_agent_response(self.console, report)
             self.console.print()
             self.console.print(build_final_summary_panel(self.state))
         if report.status == RuntimeStatus.COMPLETED:

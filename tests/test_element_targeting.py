@@ -321,6 +321,60 @@ class TestElementTargetingValidation:
 
         assert result.decision_type == PlannerDecisionType.ACT
 
+    def test_validate_element_targeting_allows_domain_like_result_controls_after_read(self) -> None:
+        """Search-result domain controls should not be treated as redundant rereads."""
+        loop = create_mock_loop()
+        observation = AgentObservation(
+            page_url="https://www.google.com/search?q=sushi",
+            page_title="Ёбидоёби СПб - Поиск в Google",
+            summary="Search results page",
+            visible_text_excerpt="Search results are visible.",
+            interactive_elements=[
+                InteractiveElement(
+                    element_id="element_result_group",
+                    label="spb.yobidoyobi.ru (+3), посмотреть ссылки по теме",
+                    tag="button",
+                    role="button",
+                    text="spb.yobidoyobi.ru +3",
+                    aria_label="spb.yobidoyobi.ru (+3), посмотреть ссылки по теме",
+                    selector='role=button[name="spb.yobidoyobi.ru (+3), посмотреть ссылки по теме"]',
+                ),
+            ],
+        )
+        session = RuntimeSession(
+            task=UserTask(request="Find sushi sets"),
+            settings=RuntimeSettings(max_steps=8),
+        )
+        session.add_tool_result(
+            ToolResult(
+                call_id="call_extract",
+                skill_name="extract_page_text",
+                status=ToolExecutionStatus.SUCCESS,
+                message="Extracted page text.",
+                data={
+                    "text": ("Search results with domains and descriptions. " * 80),
+                    "truncated": False,
+                    "page_url": "https://www.google.com/search?q=sushi",
+                },
+            )
+        )
+
+        decision = PlannerDecision(
+            decision_type=PlannerDecisionType.ACT,
+            rationale="Open the official site result to inspect current prices.",
+            chosen_skill="click_element",
+            skill_input={"element_id": "element_result_group"},
+            expected_outcome="The official Yobidoyobi site opens.",
+        )
+
+        result = loop._validate_element_targeting(
+            decision,
+            observation,
+            session=session,
+        )
+
+        assert result.decision_type == PlannerDecisionType.ACT
+
     def test_validate_element_targeting_allows_drilldown_click_after_extract(self) -> None:
         """Catalog drill-down clicks should not be blocked just because item text appears in extracted text."""
         loop = create_mock_loop()
