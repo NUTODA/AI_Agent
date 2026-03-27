@@ -1,193 +1,125 @@
 # Browser Agent Foundation
 
-`browser-agent-foundation` is a Python-first project scaffold for an autonomous browser agent that can accept a natural-language task, operate inside a browser session, and keep running until the task is complete or it needs more input from the user.
+![Python](https://img.shields.io/badge/python-3.10%2B-blue)
+![Playwright](https://img.shields.io/badge/browser-playwright-2EAD33)
+![Pydantic](https://img.shields.io/badge/contracts-pydantic-E92063)
+![Rich UI](https://img.shields.io/badge/console-rich-000000)
 
-The repository now includes a real typed planner layer, a real multi-step runtime loop, and a real Playwright-backed browser stack. The core architectural boundary remains the same: planner -> typed skills -> browser adapter.
+Python foundation for building LLM-driven browser agents with a real multi-step runtime, typed planner contracts, Playwright browser control, and safety-first guardrails.
 
-## Goals
+This project is designed for agents that:
 
-- Build an LLM-driven browser agent loop that reasons from the current page state.
-- Keep runtime skills modular and registry-driven instead of task-specific.
-- Enforce human confirmation before destructive or high-risk actions.
-- Make the system observable through structured trace items and final reports.
-- Keep the codebase easy to extend for scenarios like inbox cleanup, food ordering, and job applications.
+- take a natural-language task;
+- observe the current page;
+- choose the next typed action;
+- execute only registered skills;
+- stop for confirmation before risky actions;
+- produce traces and a final report you can inspect.
 
-## Non-Goals For This Stage
+## Why this project
 
-- Shipping a fully autonomous production agent.
-- Encoding scenario-specific pipelines such as "if task is spam cleanup, execute X".
-- Hiding missing implementation behind fake generic abstractions.
-- Building a monolithic runtime in a single module.
+Most browser-agent demos either hardcode workflows or hide missing pieces behind vague abstractions. This repository takes the opposite approach: keep the loop real, keep the contracts typed, and keep the system honest about what is and is not implemented.
 
-## High-Level Architecture
+## What you get
 
-The project is split into small modules with explicit boundaries:
+| Area | Included |
+| --- | --- |
+| Runtime loop | Real `observe -> plan -> guardrail -> act -> re-observe` execution |
+| Browser layer | Playwright-backed navigation, clicking, typing, scrolling, text extraction |
+| Planner boundary | Strict typed decisions: `act`, `ask_user`, `request_confirmation`, `finish`, `fail` |
+| Skills | Registry-driven, modular runtime skills instead of task-specific pipelines |
+| Safety | Confirmation gate for destructive or high-risk actions |
+| Operator UX | Optional Rich terminal UI with phases, step history, tokens, cost, and prompts |
+| Tracing | Structured reports, JSONL traces, and optional screenshots |
+| Demos | Local offline demo pages for food ordering, job search, and inbox spam review |
+| Testing | Smoke, parser, contract, selector, runtime, UI, and browser integration tests |
 
-- `cli`: terminal-style entrypoint and operator UX.
-- `ui`: optional Rich Agent Console and runtime event types for live terminal UI.
-- `runtime`: session state, trace handling, loop orchestration, final reporting.
-- `llm`: planner contracts, prompts, and structured parser boundaries.
-- `browser`: browser adapter interfaces and page-state models.
-- `skills`: registry-driven runtime skills such as observation, navigation, interaction, safety, and reporting.
-- `safety`: destructive action classification and confirmation flow.
-- `docs`: architecture, runtime, skills, rules, and roadmap documents.
+## Quick Start
 
-```mermaid
-flowchart TD
-    UserTask[UserTask] --> CliApp[CLIApp]
-    CliApp --> RuntimeSession[RuntimeSession]
-    RuntimeSession --> AgentLoop[AgentLoop]
-    AgentLoop --> Planner[Planner]
-    AgentLoop --> SkillRegistry[SkillRegistry]
-    AgentLoop --> SafetyLayer[SafetyLayer]
-    SkillRegistry --> BrowserEngine[BrowserEngine]
-    AgentLoop --> TraceRecorder[TraceRecorder]
-    AgentLoop --> FinalReport[FinalReport]
-```
-
-## Repository Layout
-
-```text
-docs/                  Architecture, rules, and roadmap
-src/browser_agent/     Runtime, browser, safety, skills, CLI, and UI (Rich console)
-tests/                 Smoke and contract tests for the foundation
-```
-
-## Quick start (pipx)
-
-Requires **Python 3.10+** on your PATH. Install [pipx](https://pypa.github.io/pipx/) first, then:
-
-```bash
-pipx install browser-agent-foundation
-browser-agent setup
-browser-agent doctor
-browser-agent demo food --ui
-```
-
-- Global config is written to `~/.browser-agent/config.yaml` (API key is never printed after save).
-- Demos use **bundled local HTML** and start a small HTTP server on `127.0.0.1` automatically; **no internet** is required for the pages (the LLM still needs your configured API).
-- To publish under the name `browser-agent` on PyPI, rename the distribution in `pyproject.toml` and release separately.
-
-Other commands: `browser-agent status`, `browser-agent reset`, `browser-agent --version`.
-
-## Running The Runtime
-
-1. Create a virtual environment.
-2. Install the package with development dependencies.
-3. Install Playwright browser binaries.
-4. Configure the planner (or run `browser-agent setup`).
-5. Run the CLI.
+### 1. Install from source
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -e .[dev]
 python -m playwright install chromium
-browser-agent "Review my inbox for spam"
-browser-agent Review my inbox for spam
 ```
 
-You can also pass flags. The default step cap is **80** (suited to multi-page research); use `--max-steps` for shorter smoke tests:
+Requirements:
+
+- Python 3.10+
+- Chromium installed through Playwright
+- API access for a supported planner backend
+
+### 2. Configure the planner
+
+The easiest path is the built-in setup wizard:
 
 ```bash
-browser-agent run --headed --start-url https://example.com --max-steps 12 "Inspect the page"
-browser-agent --capture-screenshots --start-url https://example.com --json "Observe the current page"
+browser-agent setup
+browser-agent doctor
+browser-agent status
 ```
 
-Bare task text is the default launch mode and is treated as `browser-agent run`.
+This stores config in `~/.browser-agent/config.yaml`.
 
-When you use the bare entrypoint, for example:
+### 3. Run the agent
 
 ```bash
-browser-agent "Глянь сеты роллов в Ёбидоёби в Питере до 1500 рублей"
+browser-agent "Review this page" --start-url https://example.com
+browser-agent run --ui --headed --start-url https://example.com "Inspect the page and summarize"
+browser-agent demo food --ui
 ```
 
-the CLI now applies a product-style bootstrap:
+## CLI Overview
 
-- enables `--ui` automatically;
-- enables a visible browser window (`--headed`) automatically;
-- if no `--start-url` is provided, asks a small bootstrap planner to choose the first page to open.
+| Command | Purpose |
+| --- | --- |
+| `browser-agent setup` | Install Chromium, collect API settings, and run smoke checks |
+| `browser-agent doctor` | Validate Python, Playwright, config, and planner reachability |
+| `browser-agent demo <food\|jobs\|spam>` | Run a bundled local demo page |
+| `browser-agent status` | Show version and configuration summary |
+| `browser-agent reset` | Remove `~/.browser-agent/config.yaml` |
+| `browser-agent run ...` | Run a natural-language task |
+| `browser-agent "..."` | Bare task mode; shorthand for `run` |
 
-Only explicit URLs/domains in the task are treated deterministically. Otherwise, the initial
-page choice is planner-driven, typically either a direct site URL or a search URL.
-
-### Agent Console UI (`--ui`)
-
-For a demo-ready **terminal operator console** (Rich live layout), use `--ui`:
+### Run modes
 
 ```bash
-browser-agent --ui --headed --start-url https://example.com "Inspect the page and summarize"
+browser-agent --ui --headed --start-url https://example.com "Inspect the page"
+browser-agent --capture-screenshots --start-url https://example.com --json "Observe the page"
+browser-agent run --chat --ui --headed --start-url https://example.com "Start a browsing session"
 ```
 
-On startup you’ll see a short banner (`Starting Agent Console…`), then a live layout. When the run finishes, a **Run summary** panel is printed (suitable for screenshots), plus a one-line outcome and a reminder where trace artifacts live.
+Notes:
 
-**Phases (top bar, color-coded):** `OBSERVE`, `PLAN`, `GUARDRAIL`, `ACT`, `WAITING_CONFIRMATION`, `WAITING_USER`, and terminal `FINISHED` / `FAILED`. A short **human-readable** line explains what the agent is doing (from planner rationale / expected outcome / current skill — never raw chain-of-thought).
+- `--ui` enables the Rich Agent Console with live phases and operator prompts.
+- `--json` cannot be combined with `--ui`.
+- `--chat` keeps the browser open between turns.
+- Bare task mode is treated as `browser-agent run`.
 
-**Panels:**
+## Demos
 
-| Area | Contents |
-|------|-----------|
-| **Top** | Task, status, step counter, model/provider, **phase chip**, narrative line |
-| **Left — Status & tokens** | URL/title; model; LLM request count; prompt / completion / total tokens; estimated cost; average LLM latency; duration. Token/cost lines show **(estimated)** when usage is approximate or missing from the provider. |
-| **Center — Issue** (when needed) | Red **ERROR** block for tool failures, ambiguous targets, blocked actions, planner failures, or confirmation context |
-| **Center — Steps** | Last ~10 steps: step number, **phase**, short reason, humanized skill name (e.g. `Click Element`), target, expected outcome, result, progress |
-| **Right — Current state** | Observation snippet, interactive element count, warnings, last decision |
-| **Bottom** | Confirmation (`Y`/`N`) or blocking user question + answer prompt (same resume flow as non-UI CLI) |
-
-**Example final summary (illustrative):**
-
-```text
-╞════════════ Run summary ════════════╡
-RUN COMPLETED
-
-Task: Inspect the page and summarize
-Outcome: Completed
-Steps: 4
-LLM calls: 5
-Tokens (total): 12,450
-  Prompt: 11,000
-  Completion: 1,450
-Est. cost: $0.0234
-Avg LLM latency: 890 ms
-Duration: 02:14
-
-Summary: …
-
-Key actions:
-  • Navigate — …
-  • Click Element — …
-
-Visited URLs:
-  • https://example.com/…
-
-Artifacts (traces & files):
-  • traces/session_….md
-  • traces/session_….jsonl
-```
-
-`--ui` cannot be combined with `--json`.
-
-If the `playwright` shell command is unavailable in your environment, run the browser install step through Python instead:
+Bundled demos run on local HTML pages served from `127.0.0.1`, so the pages themselves do not require internet access.
 
 ```bash
-python -m playwright install chromium
+browser-agent demo food --ui
+browser-agent demo jobs --ui
+browser-agent demo spam --ui
 ```
 
-The multi-step planner is not enabled by default. Configure it through environment variables or a `.env` file:
+Included scenarios:
 
-1. Copy `.env.example` to `.env` or `.env.browser-agent`:
-   ```bash
-   cp .env.example .env.browser-agent
-   ```
+- `food`: order a demo meal from a local menu page
+- `jobs`: filter demo job listings and find a matching role
+- `spam`: inspect a demo inbox and mark suspicious messages as spam
 
-2. Edit the file and set your API key and provider.
+## Configuration
 
-3. Run:
-   ```bash
-   browser-agent --start-url https://example.com "Inspect the current page"
-   ```
+You can use `browser-agent setup`, or configure the planner manually through environment variables.
 
-### Provider: OpenAI-compatible
+<details>
+<summary>OpenAI-compatible example</summary>
 
 ```bash
 BROWSER_AGENT_PLANNER_ENABLED=true
@@ -197,7 +129,10 @@ BROWSER_AGENT_PLANNER_MODEL=gpt-4o-mini
 BROWSER_AGENT_PLANNER_API_KEY=sk-...
 ```
 
-### Provider: Google Gemini
+</details>
+
+<details>
+<summary>Google Gemini-compatible example</summary>
 
 ```bash
 BROWSER_AGENT_PLANNER_ENABLED=true
@@ -207,135 +142,89 @@ BROWSER_AGENT_PLANNER_MODEL=gemini-flash-latest
 BROWSER_AGENT_PLANNER_API_KEY=AIza...
 ```
 
-- For Google AI Studio, get your API key at https://aistudio.google.com/app/apikey
-- The `BASE_URL` can be just the host (e.g. `https://generativelanguage.googleapis.com/v1beta`) — the model ID and `:generateContent` are appended automatically.
+</details>
 
-If the planner is not configured, the CLI now says so explicitly instead of falling back to fake autonomy.
+The repository also includes `.env.example` if you prefer env-based setup for local development.
 
-## Current Status
+## How it works
 
-Current stage: real multi-step planner/runtime integration.
+```mermaid
+flowchart TD
+    A["User task"] --> B["CLI / Agent Console"]
+    B --> C["Runtime session"]
+    C --> D["Observe page"]
+    D --> E["Planner"]
+    E --> F["Typed decision"]
+    F --> G["Safety guardrails"]
+    G --> H["Skill registry"]
+    H --> I["Playwright browser engine"]
+    I --> D
+    C --> J["Trace recorder"]
+    C --> K["Final report"]
+```
 
-What already exists:
+Core boundary:
 
-- architecture documents and project rules;
-- typed runtime models for the agent loop and tool contracts;
-- a strict planner decision contract with structured `act`, `ask_user`, `request_confirmation`, `finish`, and `fail` outcomes;
-- a minimal OpenAI-compatible planner provider abstraction plus fake provider support for tests;
-- a strict planner parser that validates JSON, skill names, and skill arguments before runtime execution;
-- a modular skill system with a default registry;
-- a safety layer for confirmation gating;
-- a real Playwright-backed browser adapter with lifecycle management;
-- real page observation, interactive element extraction, navigation, clicking, typing, and text extraction;
-- a real multi-step observe -> plan -> guardrail -> execute -> re-observe loop;
-- deterministic progress detection and stagnation protection;
-- structured execution trace artifacts with planner decisions, progress outcomes, and optional screenshots;
-- smoke, parser, contract, selector, runtime, and local browser integration tests.
+```text
+planner -> typed skills -> browser adapter
+```
 
-What is intentionally not implemented yet:
+## Repository Layout
 
-- full conversational resume UX in the CLI after confirmation or user-question pauses;
-- persistent memory beyond the current process and trace artifacts;
-- multiple LLM provider adapters beyond the current OpenAI-compatible transport;
-- scenario execution depth for inbox, food, or job workflows.
-
-## Demo Reality
-
-The CLI now runs a real multi-step browser session when the planner is configured. The current demo flow is intentionally honest:
-
-- the runtime performs a real observation before each planning step;
-- the planner chooses one typed atomic next step at a time;
-- the runtime executes only registered skills and re-observes after execution;
-- risky actions pause for explicit confirmation;
-- blocking ambiguity pauses for a user answer;
-- the loop stops with a final report, a confirmation request, or a blocking user question.
-
-This repository still does not claim unrestricted general autonomy. The loop is real, but it remains bounded, typed, safety-gated, and intentionally provider-minimal.
-
-## Key Design Principles
-
-- No hardcoded task-specific pipelines.
-- No destructive action without explicit confirmation.
-- No large ambiguous modules with mixed responsibilities.
-- No undocumented or untyped runtime tool interfaces.
-- Every decision should be explainable from observation plus trace history.
+```text
+src/browser_agent/     Runtime, browser engine, CLI, UI, skills, safety, planner
+tests/                 Smoke, runtime, parser, selector, UI, and integration tests
+docs/                  Architecture, runtime notes, rules, demos, and roadmap
+demos/                 Local HTML demo pages
+traces/                Session artifacts produced by runs
+```
 
 ## Documentation
 
-- `docs/architecture.md`
-- `docs/agent-runtime.md`
-- `docs/subagents.md`
-- `docs/skills.md`
-- `docs/rules.md`
-- `docs/roadmap.md`
+- [Architecture](docs/architecture.md)
+- [Agent Runtime](docs/agent-runtime.md)
+- [Skills](docs/skills.md)
+- [Human Checkpoints](docs/human-checkpoints.md)
+- [Demo Notes](docs/demo.md)
+- [Rules](docs/rules.md)
+- [Roadmap](docs/roadmap.md)
 
-## Running Controlled Demos
+## Current Status
 
-The repository includes controlled demo pages for reproducible testing and demonstrations.
+What is already real:
 
-### Packaged command (recommended)
+- multi-step runtime with repeated observation and replanning;
+- Playwright-backed browser actions;
+- typed planner parsing and validation;
+- guardrails and confirmation checkpoints;
+- Rich terminal UI for operator-facing runs;
+- trace artifacts and structured final reports.
 
-After install, scenarios start the local server automatically:
+What is still intentionally limited:
 
-```bash
-browser-agent demo food --ui
-browser-agent demo jobs --ui
-browser-agent demo spam --ui
-```
+- this is not a fully autonomous production agent;
+- long-lived memory is not implemented beyond process state and trace artifacts;
+- scenario depth is still shallow for inbox, food, and job workflows;
+- provider support is intentionally narrow and explicit.
 
-### Start the Demo Server (development tree)
+## Development
 
-```bash
-python demos/server.py
-```
-
-The server will start on port 8765 and print URLs for all demo pages. The same pages are bundled under `src/browser_agent/demos/pages/` for pip installs.
-
-### Available Demos
-
-1. **Inbox Management** (`http://localhost:8765/inbox_demo.html`)
-   - Demonstrates email list interaction, spam marking, filtering
-   - Shows confirmation flow for destructive actions
-
-2. **Food Ordering** (`http://localhost:8765/food_demo.html`)
-   - Demonstrates cart management, form filling, multi-step checkout
-   - Shows navigation between different page states
-
-3. **Job Applications** (`http://localhost:8765/jobs_demo.html`)
-   - Demonstrates filtering, form submission, file upload
-   - Shows modal dialog interactions
-
-### Example CLI Commands for Demos
+Run tests with:
 
 ```bash
-# Demo 1: Inbox - mark spam emails
-browser-agent --start-url http://localhost:8765/inbox_demo.html \
-  "Mark the suspicious emails as spam"
-
-# Demo 2: Food - place an order
-browser-agent --start-url http://localhost:8765/food_demo.html \
-  "Order a Classic Burger and Soft Drink, then proceed to checkout"
-
-# Demo 3: Jobs - apply for a position
-browser-agent --start-url http://localhost:8765/jobs_demo.html \
-  "Filter for remote jobs and apply to the Senior Frontend Developer position"
+pytest
 ```
 
-### What the Demos Show
+If Playwright is missing or the browser install is broken, start with:
 
-- **Generic browser interaction**: All actions use generic skills (click, type, observe, scroll)
-- **Planner-based decisions**: The agent observes and plans each step based on current page state
-- **Confirmation flow**: Risky actions pause for user approval
-- **Interactive resume**: CLI prompts for user input when the agent needs clarification
-- **Clear reporting**: Final reports show all steps, actions, and outcomes
+```bash
+browser-agent doctor
+```
 
-See `docs/demo.md` for comprehensive demo documentation.
+## Design Principles
 
-## Next Steps
-
-The project is now demo-ready with CLI resume flow, expanded generic skills, and controlled demo pages. The remaining work is focused on:
-
-- Polish and edge-case handling
-- Additional provider integrations
-- Performance optimizations
-- Extended test coverage
+- No hardcoded scenario pipelines.
+- No destructive action without explicit confirmation.
+- No fake autonomy when planner configuration is missing.
+- No oversized modules with mixed responsibilities.
+- No untyped runtime tool boundaries.
