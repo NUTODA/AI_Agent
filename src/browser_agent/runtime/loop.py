@@ -1473,35 +1473,224 @@ class RuntimeLoop:
     ) -> PlannerDecision | None:
         reason_lower = reason.lower()
         if "enough extracted evidence to answer" in reason_lower:
-            return self._auto_finish_with_collected_evidence()
+            return self._auto_finish_with_collected_evidence(
+                session=session,
+                observation=observation,
+            )
         if (
             "multiple price or value mentions" in reason_lower
             and self._task_looks_information_seeking(session.task.request)
             and self._has_same_page_rich_price_evidence(session, observation)
         ):
-            return self._auto_finish_with_collected_evidence()
+            return self._auto_finish_with_collected_evidence(
+                session=session,
+                observation=observation,
+            )
         if (
             "non-truncated page text was already extracted from the same page" in reason_lower
             and self._task_looks_information_seeking(session.task.request)
             and self._has_same_page_rich_price_evidence(session, observation)
         ):
-            return self._auto_finish_with_collected_evidence()
+            return self._auto_finish_with_collected_evidence(
+                session=session,
+                observation=observation,
+            )
         return None
 
-    def _auto_finish_with_collected_evidence(self) -> PlannerDecision:
+    def _auto_finish_with_collected_evidence(
+        self,
+        *,
+        session: RuntimeSession,
+        observation: AgentObservation,
+    ) -> PlannerDecision:
         return PlannerDecision(
             decision_type=PlannerDecisionType.FINISH,
             rationale=(
                 "Runtime validation determined that the current page already contains "
-                "enough evidence to answer honestly without another browser step."
+                "enough evidence to answer honestly, so it is assembling the final "
+                "user-facing response from the evidence already collected."
             ),
-            finish_reason=(
-                "The current page already contains enough evidence to answer the task, "
-                "so the runtime is finishing instead of taking another refinement step."
+            finish_reason=self._build_auto_finish_summary(
+                session=session,
+                observation=observation,
             ),
             completion_confidence=0.9,
             progress_assessment=PlannerProgressState.SUBSTANTIAL_PROGRESS,
         )
+
+    def _build_auto_finish_summary(
+        self,
+        *,
+        session: RuntimeSession,
+        observation: AgentObservation,
+    ) -> str:
+        prefers_russian = self._task_prefers_russian(session.task.request)
+        findings = self._collected_evidence_snippets(session, observation)
+        actions = self._describe_completed_actions(
+            session,
+            prefers_russian=prefers_russian,
+        )
+        source_url = observation.page_url or self._final_url(session)
+        page_title = " ".join((observation.page_title or "").split()).strip()
+
+        if prefers_russian:
+            found_text = (
+                "; ".join(findings)
+                if findings
+                else self._fallback_evidence_summary(observation, prefers_russian=True)
+            )
+            lines = [f"Что нашел: {found_text}."]
+            if actions:
+                lines.append(f"Что сделал: {', '.join(actions)}.")
+            if page_title and source_url:
+                lines.append(f"Источник: {page_title} - {source_url}.")
+            elif source_url:
+                lines.append(f"Источник: {source_url}.")
+            elif page_title:
+                lines.append(f"Источник: {page_title}.")
+            return "\n".join(lines)
+
+        found_text = (
+            "; ".join(findings)
+            if findings
+            else self._fallback_evidence_summary(observation, prefers_russian=False)
+        )
+        lines = [f"Found: {found_text}."]
+        if actions:
+            lines.append(f"Did: {', '.join(actions)}.")
+        if page_title and source_url:
+            lines.append(f"Source: {page_title} - {source_url}.")
+        elif source_url:
+            lines.append(f"Source: {source_url}.")
+        elif page_title:
+            lines.append(f"Source: {page_title}.")
+        return "\n".join(lines)
+
+    def _collected_evidence_snippets(
+        self,
+        session: RuntimeSession,
+        observation: AgentObservation,
+        *,
+        limit: int = 4,
+    ) -> list[str]:
+        planner_state = session.planner_state()
+        candidate_sources: list[str] = []
+
+        extracted_text = (planner_state.latest_extracted_text or "").strip()
+        if extracted_text:
+            candidate_sources.append(extracted_text)
+
+        visible_text = (observation.visible_text_excerpt or "").strip()
+        if visible_text:
+            candidate_sources.append(visible_text)
+
+        observation_summary = (observation.summary or "").strip()
+        if observation_summary:
+            candidate_sources.append(observation_summary)
+
+        for source_text in candidate_sources:
+            snippets = self._extract_evidence_snippets(source_text, limit=limit)
+            if snippets:
+                return snippets
+
+        return []
+
+    def _extract_evidence_snippets(self, text: str, *, limit: int = 4) -> list[str]:
+        import re
+
+        if not text.strip():
+            return []
+
+        parts = [
+            " ".join(part.split()).strip(" -•\t\r\n")
+            for part in re.split(r"(?:[\r\n]+|(?<=[.!?])\s+)", text)
+        ]
+        parts = [part for part in parts if part]
+
+        snippets: list[str] = []
+        for part in parts:
+            if self._count_currency_mentions(part) <= 0:
+                continue
+            cleaned = truncate_text(part.rstrip(" .;:,"), 140)
+            if cleaned and cleaned not in snippets:
+                snippets.append(cleaned)
+            if len(snippets) >= limit:
+                return snippets
+
+        if snippets:
+            return snippets
+
+        normalized = " ".join(text.split()).strip()
+        if not normalized:
+            return []
+        return [truncate_text(normalized.rstrip(" .;:,"), 180)]
+
+    def _fallback_evidence_summary(
+        self,
+        observation: AgentObservation,
+        *,
+        prefers_russian: bool,
+    ) -> str:
+        source_text = (
+            (observation.summary or "").strip()
+            or (observation.visible_text_excerpt or "").strip()
+        )
+        if source_text:
+            return truncate_text(" ".join(source_text.split()).rstrip(" .;:,"), 180)
+        if prefers_russian:
+            return "на текущей странице уже хватало данных для честного ответа"
+        return "the current page already contained enough evidence to answer honestly"
+
+    def _describe_completed_actions(
+        self,
+        session: RuntimeSession,
+        *,
+        prefers_russian: bool,
+    ) -> list[str]:
+        action_map_en = {
+            "navigate": "opened the relevant page",
+            "click_element": "used a page control to open the relevant section",
+            "extract_page_text": "read the page text",
+            "get_interactive_elements": "checked the visible controls",
+            "observe_page": "inspected the current page",
+            "scroll_viewport": "scanned the page content",
+            "type_text": "entered text into the page",
+            "select_option": "selected a page option",
+            "wait_for_element": "waited for the relevant page state",
+        }
+        action_map_ru = {
+            "navigate": "открыл нужную страницу",
+            "click_element": "перешел через элемент на странице к нужному разделу",
+            "extract_page_text": "считал текст страницы",
+            "get_interactive_elements": "проверил видимые элементы управления",
+            "observe_page": "осмотрел текущую страницу",
+            "scroll_viewport": "просмотрел содержимое страницы",
+            "type_text": "ввел текст на странице",
+            "select_option": "выбрал опцию на странице",
+            "wait_for_element": "дождался нужного состояния страницы",
+        }
+        action_map = action_map_ru if prefers_russian else action_map_en
+
+        described: list[str] = []
+        seen: set[str] = set()
+        for action in session.actions:
+            if action.tool_name == "finish_task":
+                continue
+            phrase = action_map.get(action.tool_name)
+            if phrase is None:
+                phrase = (
+                    f"выполнил шаг `{action.tool_name}`"
+                    if prefers_russian
+                    else f"executed `{action.tool_name}`"
+                )
+            if phrase in seen:
+                continue
+            seen.add(phrase)
+            described.append(phrase)
+        return described[-4:]
+
+    def _task_prefers_russian(self, request: str) -> bool:
+        return any("\u0400" <= char <= "\u04ff" for char in request)
 
     def _planner_decision_with_fallback(self, planner_context) -> PlannerDecision:
         try:

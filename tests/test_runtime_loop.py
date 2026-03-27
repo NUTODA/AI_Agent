@@ -434,6 +434,9 @@ def test_runtime_loop_auto_finishes_after_redundant_exploration_validation(tmp_p
     report = loop.run(session)
 
     assert report.status == RuntimeStatus.COMPLETED
+    assert "Found:" in report.summary
+    assert "Did:" in report.summary
+    assert "Starter set 1 239 ₽" in report.summary
     assert planner.calls == 1
     assert [action.tool_name for action in session.actions] == [
         "extract_page_text",
@@ -608,6 +611,9 @@ def test_runtime_loop_auto_finishes_after_redundant_search_refinement(tmp_path) 
     report = loop.run(session)
 
     assert report.status == RuntimeStatus.COMPLETED
+    assert "Что нашел:" in report.summary
+    assert "Что сделал:" in report.summary
+    assert "Филяй 1 499 ₽" in report.summary
     assert planner.calls == 1
     assert [action.tool_name for action in session.actions] == [
         "extract_page_text",

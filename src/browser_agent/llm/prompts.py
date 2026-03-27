@@ -32,6 +32,9 @@ PLANNER_SYSTEM_PROMPT = dedent(
       a sensitive page state, use ask_user with a concrete instruction for that manual browser step.
     - Request confirmation before risky or destructive actions.
     - Finish only when the task is sufficiently supported by observed evidence.
+    - When you choose finish, `finish_reason` must be the final user-facing answer,
+      not an internal control message. Briefly say what you found, what evidence/page
+      you relied on, and what you did to get that result.
     - If the current observation or latest extracted page text already contains enough
       concrete facts to answer the user (for example item names, prices, dates, rankings,
       or a short list that satisfies the user's filter), finish instead of taking another
