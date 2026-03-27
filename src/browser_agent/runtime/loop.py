@@ -72,6 +72,12 @@ class RuntimeLoop:
             "scroll_viewport",
         }
     )
+    _WEAK_EXPLORATION_PROGRESS_SIGNALS = frozenset(
+        {
+            "visible text excerpt changed",
+            "planner marked progress after successful execution",
+        }
+    )
 
     def __init__(
         self,
@@ -1358,8 +1364,6 @@ class RuntimeLoop:
     ) -> bool:
         if action.tool_name not in self._EXPLORATION_SKILLS:
             return False
-        if session.no_progress_streak < 2:
-            return False
 
         recent_actions = [item.tool_name for item in session.actions[-5:]] + [action.tool_name]
         if len(recent_actions) < 6:
@@ -1375,7 +1379,23 @@ class RuntimeLoop:
         if len(set(recent_urls + [current_observation.page_url])) != 1:
             return False
 
-        return True
+        if session.no_progress_streak >= 2:
+            return True
+
+        recent_trace_items = session.trace_items[-5:]
+        return all(
+            self._is_weak_exploration_progress(item) for item in recent_trace_items
+        )
+
+    def _is_weak_exploration_progress(self, trace_item) -> bool:
+        progress_outcome = getattr(trace_item, "progress_outcome", None)
+        action_name = getattr(trace_item, "action_name", None)
+        if progress_outcome is None or action_name not in self._EXPLORATION_SKILLS:
+            return False
+        signals = set(progress_outcome.signals or [])
+        if not signals:
+            return True
+        return signals.issubset(self._WEAK_EXPLORATION_PROGRESS_SIGNALS)
 
     def _decide_with_runtime_validation(
         self,
@@ -1389,7 +1409,7 @@ class RuntimeLoop:
 
         for attempt in range(self._MAX_PLANNER_REPLAN_ATTEMPTS + 1):
             decision = self._planner_decision_with_fallback(planner_context)
-            validated_decision = self._validate_element_targeting(
+            validated_decision = self._validate_runtime_decision(
                 decision,
                 observation,
                 session=session,
@@ -1450,6 +1470,26 @@ class RuntimeLoop:
         return PlannerDecision.safe_fail(
             reason,
             rationale=self._RECOVERABLE_VALIDATION_RATIONALE,
+        )
+
+    def _validate_runtime_decision(
+        self,
+        decision: PlannerDecision,
+        observation: AgentObservation | None,
+        *,
+        session: RuntimeSession | None = None,
+    ) -> PlannerDecision:
+        decision = self._validate_element_targeting(
+            decision,
+            observation,
+            session=session,
+        )
+        if self._is_recoverable_validation_failure(decision):
+            return decision
+        return self._validate_redundant_exploration(
+            decision,
+            observation,
+            session=session,
         )
 
     def _validate_element_targeting(
@@ -1534,6 +1574,64 @@ class RuntimeLoop:
                 )
 
         return decision
+
+    def _validate_redundant_exploration(
+        self,
+        decision: PlannerDecision,
+        observation: AgentObservation | None,
+        *,
+        session: RuntimeSession | None = None,
+    ) -> PlannerDecision:
+        if decision.decision_type not in {
+            PlannerDecisionType.ACT,
+            PlannerDecisionType.REQUEST_CONFIRMATION,
+        }:
+            return decision
+        if decision.chosen_skill not in {"scroll_viewport", "extract_page_text"}:
+            return decision
+        if observation is None or session is None:
+            return decision
+
+        planner_state = session.planner_state()
+        extracted_text = (planner_state.latest_extracted_text or "").strip()
+        if not extracted_text or planner_state.latest_extracted_text_truncated is True:
+            return decision
+        if (
+            planner_state.latest_extracted_text_url
+            and planner_state.latest_extracted_text_url != observation.page_url
+        ):
+            return decision
+
+        if decision.chosen_skill == "extract_page_text":
+            if len(extracted_text) < 1500:
+                return decision
+            return self._recoverable_validation_fail(
+                "Non-truncated page text was already extracted from the same page. "
+                "Prefer finishing with the evidence already collected, or use a "
+                "different interaction only when new content is clearly hidden."
+            )
+
+        if self._count_currency_mentions(extracted_text) >= 4:
+            return self._recoverable_validation_fail(
+                "Non-truncated page text from the same page already contains "
+                "multiple price or value mentions. Do not keep scrolling a "
+                "read-only listing without new evidence; prefer finishing with "
+                "the collected evidence or choosing a genuinely different action."
+            )
+
+        return decision
+
+    def _count_currency_mentions(self, text: str) -> int:
+        import re
+
+        patterns = (
+            r"(?<!\d)\d{1,3}(?:[ \u00a0]\d{3})*(?:[.,]\d{2})?\s*[₽$€£](?!\w)",
+            r"(?<!\d)\d{1,3}(?:[ \u00a0]\d{3})*(?:[.,]\d{2})?\s*(?:руб\.?|рублей|р\.)(?!\w)",
+        )
+        total = 0
+        for pattern in patterns:
+            total += len(re.findall(pattern, text, flags=re.IGNORECASE))
+        return total
 
     def _find_observed_element_by_id(
         self,

@@ -17,8 +17,10 @@ from browser_agent.runtime.models import (
     HumanInterventionKind,
     PlannerDecisionType,
     PlannerProgressState,
+    ProgressOutcome,
     RiskLevel,
     RuntimeStatus,
+    ToolResult,
     ToolExecutionStatus,
     UserTask,
 )
@@ -131,6 +133,28 @@ class InvalidThenValidTargetingPlanner:
                 expected_outcome="The CTA is activated.",
             )
         return finish_decision("Recovered from invalid targeting and completed the task.")
+
+
+class RedundantExplorationThenFinishPlanner:
+    """Emit one redundant exploration step, then finish after runtime replan."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def decide(self, planner_context) -> PlannerDecision:
+        del planner_context
+        self.calls += 1
+        if self.calls == 1:
+            return act_decision(
+                skill="scroll_viewport",
+                skill_input={"direction": "down", "amount": 1200},
+                rationale="Scroll further to load more prices from the same listing.",
+                expected_outcome="More products become visible on the same page.",
+                progress_assessment=PlannerProgressState.NO_PROGRESS,
+            )
+        return finish_decision(
+            "The page already contained enough extracted evidence to stop."
+        )
 
 
 class FailingClickBrowser(StubBrowserEngine):
@@ -288,6 +312,75 @@ def test_runtime_loop_replans_after_recoverable_targeting_validation(tmp_path) -
     ]
     assert any(
         "rejected by runtime validation" in line
+        for line in session.execution_history_summary
+    )
+
+
+def test_runtime_loop_replans_after_redundant_exploration_validation(tmp_path) -> None:
+    settings = RuntimeSettings(
+        trace_dir=tmp_path / "traces",
+        artifact_dir=tmp_path / "artifacts",
+        max_steps=4,
+    )
+    browser = StubBrowserEngine(
+        initial_state=PageState(
+            url="https://example.com/catalog",
+            title="Catalog",
+            summary="Catalog page.",
+            text_excerpt="Affordable sets are listed on the page.",
+        )
+    )
+    session = RuntimeSession(
+        task=UserTask(request="Find sets under the budget"),
+        settings=settings,
+    )
+    session.add_observation(
+        AgentObservation(
+            page_url="https://example.com/catalog",
+            page_title="Catalog",
+            summary="Catalog page.",
+            visible_text_excerpt="Affordable sets are listed on the page.",
+        )
+    )
+    session.add_action(
+        AgentAction(
+            tool_name="extract_page_text",
+            rationale="Read the listing text.",
+            parameters={"max_chars": 4000},
+            expected_outcome="Capture the visible listing text.",
+        )
+    )
+    session.add_tool_result(
+        ToolResult(
+            call_id="call_existing_extract",
+            skill_name="extract_page_text",
+            status=ToolExecutionStatus.SUCCESS,
+            message="Skill `extract_page_text` completed successfully.",
+            data={
+                "text": (
+                    "Starter set 1 239 ₽. Family set 1 159 ₽. Lunch combo 1 190 ₽. "
+                    "Party set 1 129 ₽."
+                ),
+                "truncated": False,
+                "page_url": "https://example.com/catalog",
+            },
+            duration_ms=8,
+        )
+    )
+    planner = RedundantExplorationThenFinishPlanner()
+    loop = build_loop(planner=planner, browser=browser, trace_dir=settings.trace_dir)
+
+    report = loop.run(session)
+
+    assert report.status == RuntimeStatus.COMPLETED
+    assert planner.calls == 2
+    assert [action.tool_name for action in session.actions] == [
+        "extract_page_text",
+        "finish_task",
+    ]
+    assert any(
+        "rejected by runtime validation" in line
+        and "multiple price or value mentions" in line
         for line in session.execution_history_summary
     )
 
@@ -843,6 +936,130 @@ def test_repetitive_exploration_loop_requires_stagnation(tmp_path) -> None:
     )
 
     assert should_stop is False
+
+
+def test_repetitive_exploration_loop_stops_on_weak_text_only_progress(tmp_path) -> None:
+    settings = RuntimeSettings(
+        trace_dir=tmp_path / "traces",
+        artifact_dir=tmp_path / "artifacts",
+        max_steps=12,
+    )
+    session = RuntimeSession(
+        task=UserTask(request="Find roll sets under 1500 RUB"),
+        settings=settings,
+    )
+    session.no_progress_streak = 0
+    session.actions.extend(
+        [
+            AgentAction(
+                tool_name="extract_page_text",
+                rationale="Read visible text.",
+                parameters={"max_chars": 12000},
+                expected_outcome="Capture visible text.",
+            ),
+            AgentAction(
+                tool_name="scroll_viewport",
+                rationale="Reveal more products.",
+                parameters={"direction": "down", "amount": 1400},
+                expected_outcome="Reveal more content.",
+            ),
+            AgentAction(
+                tool_name="extract_page_text",
+                rationale="Read after scrolling.",
+                parameters={"max_chars": 12000},
+                expected_outcome="Capture more text.",
+            ),
+            AgentAction(
+                tool_name="scroll_viewport",
+                rationale="Reveal more products again.",
+                parameters={"direction": "down", "amount": 1400},
+                expected_outcome="Reveal more content.",
+            ),
+            AgentAction(
+                tool_name="extract_page_text",
+                rationale="Read after scrolling again.",
+                parameters={"max_chars": 12000},
+                expected_outcome="Capture more text.",
+            ),
+        ]
+    )
+    session.trace_items.extend(
+        [
+            MagicMock(
+                current_url="https://spb.yobidoyobi.ru/menu/nabory",
+                action_name="extract_page_text",
+                progress_outcome=ProgressOutcome(
+                    made_progress=True,
+                    summary="Observable progress detected after the last planner step.",
+                    signals=["visible text excerpt changed"],
+                    no_progress_streak=0,
+                ),
+            ),
+            MagicMock(
+                current_url="https://spb.yobidoyobi.ru/menu/nabory",
+                action_name="scroll_viewport",
+                progress_outcome=ProgressOutcome(
+                    made_progress=True,
+                    summary="Observable progress detected after the last planner step.",
+                    signals=["visible text excerpt changed"],
+                    no_progress_streak=0,
+                ),
+            ),
+            MagicMock(
+                current_url="https://spb.yobidoyobi.ru/menu/nabory",
+                action_name="extract_page_text",
+                progress_outcome=ProgressOutcome(
+                    made_progress=True,
+                    summary="Observable progress detected after the last planner step.",
+                    signals=["visible text excerpt changed"],
+                    no_progress_streak=0,
+                ),
+            ),
+            MagicMock(
+                current_url="https://spb.yobidoyobi.ru/menu/nabory",
+                action_name="scroll_viewport",
+                progress_outcome=ProgressOutcome(
+                    made_progress=True,
+                    summary="Observable progress detected after the last planner step.",
+                    signals=["visible text excerpt changed"],
+                    no_progress_streak=0,
+                ),
+            ),
+            MagicMock(
+                current_url="https://spb.yobidoyobi.ru/menu/nabory",
+                action_name="extract_page_text",
+                progress_outcome=ProgressOutcome(
+                    made_progress=True,
+                    summary="Observable progress detected after the last planner step.",
+                    signals=["visible text excerpt changed"],
+                    no_progress_streak=0,
+                ),
+            ),
+        ]
+    )
+    loop = build_loop(
+        planner=QueuePlanner([]),
+        browser=StubBrowserEngine(),
+        trace_dir=settings.trace_dir,
+    )
+
+    should_stop = loop._is_repetitive_exploration_loop(
+        action=AgentAction(
+            tool_name="scroll_viewport",
+            rationale="Keep looking for cheaper sets.",
+            parameters={"direction": "down", "amount": 1400},
+            expected_outcome="Reveal more content.",
+        ),
+        session=session,
+        current_observation=AgentObservation(
+            page_url="https://spb.yobidoyobi.ru/menu/nabory",
+            page_title="Наборы",
+            summary="Sets page with repeated text-only progress.",
+            visible_text_excerpt="Another chunk of the same long listing.",
+        ),
+    )
+
+    assert should_stop is True
 
 
 def test_planner_context_includes_latest_extracted_text(tmp_path) -> None:
