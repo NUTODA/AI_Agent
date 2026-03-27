@@ -218,6 +218,46 @@ class RedundantSortRefinementThenFinishPlanner:
         return finish_decision("The extracted listing already contains enough priced options.")
 
 
+class RedundantExplorationWithConcreteEvidencePlanner:
+    """Repeat read-only exploration despite already having concrete same-page facts."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def decide(self, planner_context) -> PlannerDecision:
+        del planner_context
+        self.calls += 1
+        if self.calls == 1:
+            return act_decision(
+                skill="scroll_viewport",
+                skill_input={"direction": "down", "amount": 900},
+                rationale="Keep scrolling to see whether the page repeats the same facts.",
+                expected_outcome="Additional visible text appears on the same page.",
+                progress_assessment=PlannerProgressState.NO_PROGRESS,
+            )
+        return finish_decision("The page already contained enough extracted evidence to stop.")
+
+
+class RedundantSearchRefinementWithConcreteEvidencePlanner:
+    """Try an unnecessary on-page search after concrete evidence is already visible."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def decide(self, planner_context) -> PlannerDecision:
+        del planner_context
+        self.calls += 1
+        if self.calls == 1:
+            return act_decision(
+                skill="type_text",
+                skill_input={"field_id": "field_search", "text": "контакты"},
+                rationale="Use page search to narrow the visible rules.",
+                expected_outcome="Only the matching facts remain on the page.",
+                progress_assessment=PlannerProgressState.NO_PROGRESS,
+            )
+        return finish_decision("The extracted page already contains the needed facts.")
+
+
 class FailingClickBrowser(StubBrowserEngine):
     """Stub browser that returns a structured click failure."""
 
@@ -484,7 +524,7 @@ def test_runtime_loop_auto_finishes_after_redundant_exploration_validation(tmp_p
     ]
     assert any(
         "converting the rejected planner action into finish" in line
-        and "multiple price or value mentions" in line
+        and "Validation issue: sufficient_same_page_evidence" in line
         for line in session.execution_history_summary
     )
 
@@ -661,7 +701,7 @@ def test_runtime_loop_auto_finishes_after_redundant_search_refinement(tmp_path) 
     ]
     assert any(
         "converting the rejected planner action into finish" in line
-        and "search or filter input" in line
+        and "Validation issue: redundant_refinement" in line
         for line in session.execution_history_summary
     )
 
@@ -752,7 +792,275 @@ def test_runtime_loop_auto_finishes_after_redundant_sort_refinement(tmp_path) ->
     ]
     assert any(
         "converting the rejected planner action into finish" in line
-        and "sort, filter, or search" in line
+        and "Validation issue: redundant_refinement" in line
+        for line in session.execution_history_summary
+    )
+
+
+def test_runtime_loop_auto_finishes_after_redundant_exploration_with_concrete_non_price_evidence(
+    tmp_path,
+) -> None:
+    settings = RuntimeSettings(
+        trace_dir=tmp_path / "traces",
+        artifact_dir=tmp_path / "artifacts",
+        max_steps=4,
+    )
+    browser = StubBrowserEngine(
+        initial_state=PageState(
+            url="https://example.com/faq",
+            title="FAQ",
+            summary="Rules page with visible details.",
+            text_excerpt="Key rules are visible on the page.",
+        )
+    )
+    session = RuntimeSession(
+        task=UserTask(request="Summarize the filing details shown on this page"),
+        settings=settings,
+    )
+    session.add_observation(
+        AgentObservation(
+            page_url="https://example.com/faq",
+            page_title="FAQ",
+            summary="Rules page with visible details.",
+            visible_text_excerpt="Key rules are visible on the page.",
+        )
+    )
+    session.add_action(
+        AgentAction(
+            tool_name="extract_page_text",
+            rationale="Read the page text.",
+            parameters={"max_chars": 4000},
+            expected_outcome="Capture the visible rules and deadlines.",
+        )
+    )
+    session.add_tool_result(
+        ToolResult(
+            call_id="call_existing_extract",
+            skill_name="extract_page_text",
+            status=ToolExecutionStatus.SUCCESS,
+            message="Skill `extract_page_text` completed successfully.",
+            data={
+                "text": (
+                    "Applications open on 01.04.2026. Processing time is 5 days. "
+                    "Support line: +7 (800) 555-11-22. Office hours: 09:00-18:00."
+                ),
+                "truncated": False,
+                "page_url": "https://example.com/faq",
+            },
+            duration_ms=8,
+        )
+    )
+    planner = RedundantExplorationWithConcreteEvidencePlanner()
+    loop = build_loop(planner=planner, browser=browser, trace_dir=settings.trace_dir)
+
+    report = loop.run(session)
+
+    assert report.status == RuntimeStatus.COMPLETED
+    assert "Found:" in report.summary
+    assert "Applications open on 01.04.2026" in report.summary
+    assert planner.calls == 1
+    assert [action.tool_name for action in session.actions] == [
+        "extract_page_text",
+        "finish_task",
+    ]
+    assert any(
+        "converting the rejected planner action into finish" in line
+        and "Validation issue: sufficient_same_page_evidence" in line
+        for line in session.execution_history_summary
+    )
+
+
+def test_runtime_loop_auto_finishes_after_redundant_search_refinement_with_concrete_non_price_evidence(
+    tmp_path,
+) -> None:
+    settings = RuntimeSettings(
+        trace_dir=tmp_path / "traces",
+        artifact_dir=tmp_path / "artifacts",
+        max_steps=4,
+    )
+    browser = StubBrowserEngine(
+        initial_state=PageState(
+            url="https://example.com/rules",
+            title="Правила подачи",
+            summary="Страница с правилами подачи.",
+            text_excerpt="Сроки и контакты уже видны.",
+        )
+    )
+    session = RuntimeSession(
+        task=UserTask(request="Прочитай сроки и контакты на этой странице"),
+        settings=settings,
+    )
+    session.add_observation(
+        AgentObservation(
+            page_url="https://example.com/rules",
+            page_title="Правила подачи",
+            summary="Страница с правилами подачи.",
+            visible_text_excerpt="Сроки и контакты уже видны.",
+            form_fields=[
+                FormFieldSummary(
+                    field_id="field_search",
+                    label="Поиск по странице",
+                    selector='input[name="search"]',
+                    field_type="text",
+                )
+            ],
+        )
+    )
+    session.add_action(
+        AgentAction(
+            tool_name="extract_page_text",
+            rationale="Считать текст страницы.",
+            parameters={"max_chars": 4000},
+            expected_outcome="Захватить сроки и контактные данные.",
+        )
+    )
+    session.add_tool_result(
+        ToolResult(
+            call_id="call_existing_extract",
+            skill_name="extract_page_text",
+            status=ToolExecutionStatus.SUCCESS,
+            message="Skill `extract_page_text` completed successfully.",
+            data={
+                "text": (
+                    "Прием заявлений до 15.04.2026. Рассмотрение занимает 10 дней. "
+                    "Телефон поддержки: +7 (495) 123-45-67. Часы приема: 10:00-17:00."
+                ),
+                "truncated": False,
+                "page_url": "https://example.com/rules",
+            },
+            duration_ms=8,
+        )
+    )
+    planner = RedundantSearchRefinementWithConcreteEvidencePlanner()
+    loop = build_loop(planner=planner, browser=browser, trace_dir=settings.trace_dir)
+
+    report = loop.run(session)
+
+    assert report.status == RuntimeStatus.COMPLETED
+    assert "Что нашел:" in report.summary
+    assert "Прием заявлений до 15.04.2026" in report.summary
+    assert planner.calls == 1
+    assert [action.tool_name for action in session.actions] == [
+        "extract_page_text",
+        "finish_task",
+    ]
+    assert any(
+        "converting the rejected planner action into finish" in line
+        and "Validation issue: redundant_refinement" in line
+        for line in session.execution_history_summary
+    )
+
+
+def test_same_page_irrelevant_numeric_text_does_not_count_as_sufficient_evidence(
+    tmp_path,
+) -> None:
+    settings = RuntimeSettings(
+        trace_dir=tmp_path / "traces",
+        artifact_dir=tmp_path / "artifacts",
+    )
+    session = RuntimeSession(
+        task=UserTask(request="Find the refund policy link on this page"),
+        settings=settings,
+    )
+    observation = AgentObservation(
+        page_url="https://example.com/help",
+        page_title="Help Center",
+        summary="Help page with several operational details.",
+        visible_text_excerpt="Dates and phone numbers are visible, but not the requested link.",
+    )
+    session.add_tool_result(
+        ToolResult(
+            call_id="call_existing_extract",
+            skill_name="extract_page_text",
+            status=ToolExecutionStatus.SUCCESS,
+            message="Skill `extract_page_text` completed successfully.",
+            data={
+                "text": (
+                    "Version 2.4.1 updated on 01.04.2026. Support line: +7 (800) 555-11-22. "
+                    "Office hours: 09:00-18:00."
+                ),
+                "truncated": False,
+                "page_url": "https://example.com/help",
+            },
+            duration_ms=8,
+        )
+    )
+    loop = build_loop(
+        planner=QueuePlanner([]),
+        browser=StubBrowserEngine(),
+        trace_dir=settings.trace_dir,
+    )
+
+    assert loop._has_same_page_sufficient_evidence(session, observation) is False
+
+
+def test_runtime_loop_keeps_exploration_allowed_for_irrelevant_numeric_page_details(
+    tmp_path,
+) -> None:
+    settings = RuntimeSettings(
+        trace_dir=tmp_path / "traces",
+        artifact_dir=tmp_path / "artifacts",
+        max_steps=4,
+    )
+    browser = StubBrowserEngine(
+        initial_state=PageState(
+            url="https://example.com/help",
+            title="Help Center",
+            summary="Help page with support metadata.",
+            text_excerpt="Dates and support metadata are visible.",
+        )
+    )
+    session = RuntimeSession(
+        task=UserTask(request="Find the refund policy link on this page"),
+        settings=settings,
+    )
+    session.add_observation(
+        AgentObservation(
+            page_url="https://example.com/help",
+            page_title="Help Center",
+            summary="Help page with support metadata.",
+            visible_text_excerpt="Dates and support metadata are visible.",
+        )
+    )
+    session.add_action(
+        AgentAction(
+            tool_name="extract_page_text",
+            rationale="Read the help page text.",
+            parameters={"max_chars": 4000},
+            expected_outcome="Capture the currently visible help text.",
+        )
+    )
+    session.add_tool_result(
+        ToolResult(
+            call_id="call_existing_extract",
+            skill_name="extract_page_text",
+            status=ToolExecutionStatus.SUCCESS,
+            message="Skill `extract_page_text` completed successfully.",
+            data={
+                "text": (
+                    "Version 2.4.1 updated on 01.04.2026. Support line: +7 (800) 555-11-22. "
+                    "Office hours: 09:00-18:00."
+                ),
+                "truncated": False,
+                "page_url": "https://example.com/help",
+            },
+            duration_ms=8,
+        )
+    )
+    planner = RedundantExplorationWithConcreteEvidencePlanner()
+    loop = build_loop(planner=planner, browser=browser, trace_dir=settings.trace_dir)
+
+    report = loop.run(session)
+
+    assert report.status == RuntimeStatus.COMPLETED
+    assert planner.calls == 2
+    assert [action.tool_name for action in session.actions] == [
+        "extract_page_text",
+        "scroll_viewport",
+        "finish_task",
+    ]
+    assert all(
+        "Validation issue: sufficient_same_page_evidence" not in line
         for line in session.execution_history_summary
     )
 
@@ -1308,6 +1616,79 @@ def test_repetitive_exploration_loop_requires_stagnation(tmp_path) -> None:
     )
 
     assert should_stop is False
+
+
+def test_repetitive_exploration_loop_tolerates_one_non_exploration_step(tmp_path) -> None:
+    settings = RuntimeSettings(
+        trace_dir=tmp_path / "traces",
+        artifact_dir=tmp_path / "artifacts",
+        max_steps=12,
+    )
+    session = RuntimeSession(
+        task=UserTask(request="Find the weekly weather forecast"),
+        settings=settings,
+    )
+    session.no_progress_streak = 2
+    session.actions.extend(
+        [
+            AgentAction(
+                tool_name="scroll_viewport",
+                rationale="Scroll for the forecast block.",
+                parameters={"direction": "down", "amount": 900},
+                expected_outcome="A lower section becomes available.",
+            ),
+            AgentAction(
+                tool_name="extract_page_text",
+                rationale="Read after scrolling.",
+                parameters={"max_chars": 500},
+                expected_outcome="Capture more readable text.",
+            ),
+            AgentAction(
+                tool_name="click_element",
+                rationale="Open a visible navigation link.",
+                parameters={"element_id": "element_weather_link"},
+                expected_outcome="The forecast page opens.",
+            ),
+            AgentAction(
+                tool_name="scroll_viewport",
+                rationale="Scroll again.",
+                parameters={"direction": "down", "amount": 900},
+                expected_outcome="A lower section becomes available.",
+            ),
+            AgentAction(
+                tool_name="extract_page_text",
+                rationale="Read after scrolling again.",
+                parameters={"max_chars": 500},
+                expected_outcome="Capture more readable text.",
+            ),
+        ]
+    )
+    session.trace_items.extend(
+        [MagicMock(current_url="https://example.com/weather") for _ in range(5)]
+    )
+    loop = build_loop(
+        planner=QueuePlanner([]),
+        browser=ScrollingTextBrowser(),
+        trace_dir=settings.trace_dir,
+    )
+
+    should_stop = loop._is_repetitive_exploration_loop(
+        action=AgentAction(
+            tool_name="scroll_viewport",
+            rationale="Keep looking for the forecast block.",
+            parameters={"direction": "down", "amount": 900},
+            expected_outcome="A lower section becomes available.",
+        ),
+        session=session,
+        current_observation=AgentObservation(
+            page_url="https://example.com/weather",
+            page_title="Weather",
+            summary="Weather page with repetitive exploration.",
+            visible_text_excerpt="Chunk 6",
+        ),
+    )
+
+    assert should_stop is True
 
 
 def test_repetitive_exploration_loop_stops_on_weak_text_only_progress(tmp_path) -> None:

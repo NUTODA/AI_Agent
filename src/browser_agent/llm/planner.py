@@ -346,7 +346,10 @@ def _format_input_contract_line(
     required_label = "required" if required else "optional"
     description = definition.get("description")
     if isinstance(description, str) and description:
-        return f"{field_name}: {type_label} ({required_label}) - {description}"
+        return (
+            f"{field_name}: {type_label} ({required_label}) - hint: "
+            f"{_normalize_prompt_text(description)}"
+        )
     return f"{field_name}: {type_label} ({required_label})"
 
 
@@ -378,3 +381,9 @@ def _schema_type(definition: dict[str, Any]) -> str:
     if "$ref" in definition:
         return str(definition["$ref"]).split("/")[-1]
     return "object"
+
+
+def _normalize_prompt_text(text: str) -> str:
+    """Collapse whitespace so prompt-facing schema hints stay compact and legible."""
+
+    return " ".join(text.split()).strip()

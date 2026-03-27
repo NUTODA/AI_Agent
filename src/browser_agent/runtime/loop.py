@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from enum import Enum
 from time import perf_counter
 
 from browser_agent.browser.engine import BrowserEngine
@@ -56,6 +58,25 @@ from browser_agent.ui.events import (
 from browser_agent.ui.formatting import format_tool_target, summarize_skill_input, truncate_text
 
 
+class RuntimeValidationFailureKind(str, Enum):
+    """Structured reasons why runtime validation rejected a planner action."""
+
+    AMBIGUOUS_TARGET = "ambiguous_target"
+    TARGETING_POLICY = "targeting_policy"
+    REDUNDANT_INSPECTION = "redundant_inspection"
+    SUFFICIENT_SAME_PAGE_EVIDENCE = "sufficient_same_page_evidence"
+    REDUNDANT_REFINEMENT = "redundant_refinement"
+    REDUNDANT_READING_CLICK = "redundant_reading_click"
+
+
+@dataclass(slots=True)
+class RuntimeValidationResult:
+    """Planner decision paired with an optional structured validation failure kind."""
+
+    decision: PlannerDecision
+    failure_kind: RuntimeValidationFailureKind | None = None
+
+
 class RuntimeLoop:
     """Coordinate planning, safety checks, skill execution, and reporting."""
 
@@ -76,6 +97,13 @@ class RuntimeLoop:
         {
             "visible text excerpt changed",
             "planner marked progress after successful execution",
+        }
+    )
+    _AUTO_FINISH_VALIDATION_FAILURES = frozenset(
+        {
+            RuntimeValidationFailureKind.SUFFICIENT_SAME_PAGE_EVIDENCE,
+            RuntimeValidationFailureKind.REDUNDANT_REFINEMENT,
+            RuntimeValidationFailureKind.REDUNDANT_READING_CLICK,
         }
     )
 
@@ -1370,9 +1398,15 @@ class RuntimeLoop:
         recent_actions = [item.tool_name for item in session.actions[-5:]] + [action.tool_name]
         if len(recent_actions) < 6:
             return False
-        if any(name not in self._EXPLORATION_SKILLS for name in recent_actions):
+        exploration_actions = [
+            name for name in recent_actions if name in self._EXPLORATION_SKILLS
+        ]
+        if len(exploration_actions) < 5:
             return False
-        if "scroll_viewport" not in recent_actions or "extract_page_text" not in recent_actions:
+        if (
+            "scroll_viewport" not in exploration_actions
+            or "extract_page_text" not in exploration_actions
+        ):
             return False
 
         recent_urls = [item.current_url for item in session.trace_items[-5:] if item.current_url]
@@ -1411,11 +1445,12 @@ class RuntimeLoop:
 
         for attempt in range(self._MAX_PLANNER_REPLAN_ATTEMPTS + 1):
             decision = self._planner_decision_with_fallback(planner_context)
-            validated_decision = self._validate_runtime_decision(
+            validation_result = self._validate_runtime_decision(
                 decision,
                 observation,
                 session=session,
             )
+            validated_decision = validation_result.decision
             if not self._is_recoverable_validation_failure(validated_decision):
                 return validated_decision
 
@@ -1426,18 +1461,20 @@ class RuntimeLoop:
             auto_finish_decision = self._maybe_finish_after_validation_failure(
                 session=session,
                 observation=observation,
-                reason=reason,
+                failure_kind=validation_result.failure_kind,
             )
             if auto_finish_decision is not None:
                 session.record_history(
                     "Runtime validation determined the current page already has enough "
                     "evidence; converting the rejected planner action into finish. "
+                    f"Validation issue: {validation_result.failure_kind.value if validation_result.failure_kind else 'unknown'}. "
                     f"Reason: {reason}"
                 )
                 return auto_finish_decision
             session.record_history(
                 "Planner decision was rejected by runtime validation; requesting "
                 f"replan ({attempt + 1}/{self._MAX_PLANNER_REPLAN_ATTEMPTS + 1}). "
+                f"Validation issue: {validation_result.failure_kind.value if validation_result.failure_kind else 'unknown'}. "
                 f"Reason: {reason}"
             )
             if attempt >= self._MAX_PLANNER_REPLAN_ATTEMPTS:
@@ -1471,33 +1508,18 @@ class RuntimeLoop:
         *,
         session: RuntimeSession,
         observation: AgentObservation,
-        reason: str,
+        failure_kind: RuntimeValidationFailureKind | None,
     ) -> PlannerDecision | None:
-        reason_lower = reason.lower()
-        if "enough extracted evidence to answer" in reason_lower:
-            return self._auto_finish_with_collected_evidence(
-                session=session,
-                observation=observation,
-            )
-        if (
-            "multiple price or value mentions" in reason_lower
-            and self._task_looks_information_seeking(session.task.request)
-            and self._has_same_page_rich_price_evidence(session, observation)
-        ):
-            return self._auto_finish_with_collected_evidence(
-                session=session,
-                observation=observation,
-            )
-        if (
-            "non-truncated page text was already extracted from the same page" in reason_lower
-            and self._task_looks_information_seeking(session.task.request)
-            and self._has_same_page_rich_price_evidence(session, observation)
-        ):
-            return self._auto_finish_with_collected_evidence(
-                session=session,
-                observation=observation,
-            )
-        return None
+        if failure_kind not in self._AUTO_FINISH_VALIDATION_FAILURES:
+            return None
+        if not self._task_looks_information_seeking(session.task.request):
+            return None
+        if not self._has_same_page_sufficient_evidence(session, observation):
+            return None
+        return self._auto_finish_with_collected_evidence(
+            session=session,
+            observation=observation,
+        )
 
     def _auto_finish_with_collected_evidence(
         self,
@@ -1611,7 +1633,7 @@ class RuntimeLoop:
 
         snippets: list[str] = []
         for part in parts:
-            if self._count_currency_mentions(part) <= 0:
+            if not self._text_chunk_looks_concrete_evidence(part):
                 continue
             cleaned = truncate_text(part.rstrip(" .;:,"), 140)
             if cleaned and cleaned not in snippets:
@@ -1708,10 +1730,18 @@ class RuntimeLoop:
             and decision.rationale == self._RECOVERABLE_VALIDATION_RATIONALE
         )
 
-    def _recoverable_validation_fail(self, reason: str) -> PlannerDecision:
-        return PlannerDecision.safe_fail(
-            reason,
-            rationale=self._RECOVERABLE_VALIDATION_RATIONALE,
+    def _recoverable_validation_fail(
+        self,
+        reason: str,
+        *,
+        failure_kind: RuntimeValidationFailureKind,
+    ) -> RuntimeValidationResult:
+        return RuntimeValidationResult(
+            decision=PlannerDecision.safe_fail(
+                reason,
+                rationale=self._RECOVERABLE_VALIDATION_RATIONALE,
+            ),
+            failure_kind=failure_kind,
         )
 
     def _validate_runtime_decision(
@@ -1720,23 +1750,23 @@ class RuntimeLoop:
         observation: AgentObservation | None,
         *,
         session: RuntimeSession | None = None,
-    ) -> PlannerDecision:
-        decision = self._validate_element_targeting(
+    ) -> RuntimeValidationResult:
+        result = self._validate_element_targeting(
             decision,
             observation,
             session=session,
         )
-        if self._is_recoverable_validation_failure(decision):
-            return decision
-        decision = self._validate_redundant_information_refinement(
-            decision,
+        if self._is_recoverable_validation_failure(result.decision):
+            return result
+        result = self._validate_redundant_information_refinement(
+            result.decision,
             observation,
             session=session,
         )
-        if self._is_recoverable_validation_failure(decision):
-            return decision
+        if self._is_recoverable_validation_failure(result.decision):
+            return result
         return self._validate_redundant_exploration(
-            decision,
+            result.decision,
             observation,
             session=session,
         )
@@ -1747,7 +1777,7 @@ class RuntimeLoop:
         observation: AgentObservation | None,
         *,
         session: RuntimeSession | None = None,
-    ) -> PlannerDecision:
+    ) -> RuntimeValidationResult:
         """Validate that element targeting follows the policy.
 
         Rejects decisions that:
@@ -1758,10 +1788,10 @@ class RuntimeLoop:
             PlannerDecisionType.ACT,
             PlannerDecisionType.REQUEST_CONFIRMATION,
         }:
-            return decision
+            return RuntimeValidationResult(decision)
 
         if not decision.chosen_skill:
-            return decision
+            return RuntimeValidationResult(decision)
 
         if decision.chosen_skill not in {
             "click_element",
@@ -1770,7 +1800,7 @@ class RuntimeLoop:
             "press_key",
             "upload_file",
         }:
-            return decision
+            return RuntimeValidationResult(decision)
 
         skill_input = decision.skill_input or {}
         element_id = skill_input.get("element_id")
@@ -1792,13 +1822,14 @@ class RuntimeLoop:
                     return self._recoverable_validation_fail(
                         "Redundant click on a navigation-like element after the page text "
                         "was already extracted from the same page. Prefer finishing, "
-                        "summarizing, or a different non-click action."
+                        "summarizing, or a different non-click action.",
+                        failure_kind=RuntimeValidationFailureKind.REDUNDANT_READING_CLICK,
                     )
-            return decision
+            return RuntimeValidationResult(decision)
 
         # No selector provided either - let skill validation handle this
         if not selector:
-            return decision
+            return RuntimeValidationResult(decision)
 
         # Using raw selector without element_id - validate against observation
         if observation:
@@ -1811,7 +1842,8 @@ class RuntimeLoop:
                         return self._recoverable_validation_fail(
                             f"Targeting policy violation: raw selector '{selector}' "
                             f"matches observed element {element.element_id} but element_id was not used. "
-                            f"When an element is in the observation, always use its element_id."
+                            f"When an element is in the observation, always use its element_id.",
+                            failure_kind=RuntimeValidationFailureKind.TARGETING_POLICY,
                         )
 
             # Check for ambiguity (selector matches multiple elements)
@@ -1819,10 +1851,11 @@ class RuntimeLoop:
             if matching_count > 1:
                 return self._recoverable_validation_fail(
                     f"Ambiguous target: selector '{selector}' matches {matching_count} elements "
-                    f"in the observation. Use element_id for precise targeting."
+                    f"in the observation. Use element_id for precise targeting.",
+                    failure_kind=RuntimeValidationFailureKind.AMBIGUOUS_TARGET,
                 )
 
-        return decision
+        return RuntimeValidationResult(decision)
 
     def _validate_redundant_exploration(
         self,
@@ -1830,21 +1863,21 @@ class RuntimeLoop:
         observation: AgentObservation | None,
         *,
         session: RuntimeSession | None = None,
-    ) -> PlannerDecision:
+    ) -> RuntimeValidationResult:
         if decision.decision_type not in {
             PlannerDecisionType.ACT,
             PlannerDecisionType.REQUEST_CONFIRMATION,
         }:
-            return decision
+            return RuntimeValidationResult(decision)
         if decision.chosen_skill not in {
             "scroll_viewport",
             "extract_page_text",
             "get_interactive_elements",
             "observe_page",
         }:
-            return decision
+            return RuntimeValidationResult(decision)
         if observation is None or session is None:
-            return decision
+            return RuntimeValidationResult(decision)
 
         planner_state = session.planner_state()
         if (
@@ -1856,36 +1889,43 @@ class RuntimeLoop:
             return self._recoverable_validation_fail(
                 f"The current observation already includes the result of the most recent "
                 f"`{decision.chosen_skill}` call on this page. Do not repeat the same "
-                "read-only inspection step without a new interaction."
+                "read-only inspection step without a new interaction.",
+                failure_kind=RuntimeValidationFailureKind.REDUNDANT_INSPECTION,
             )
 
         extracted_text = (planner_state.latest_extracted_text or "").strip()
         if not extracted_text or planner_state.latest_extracted_text_truncated is True:
-            return decision
+            return RuntimeValidationResult(decision)
         if (
             planner_state.latest_extracted_text_url
             and planner_state.latest_extracted_text_url != observation.page_url
         ):
-            return decision
+            return RuntimeValidationResult(decision)
 
         if decision.chosen_skill == "extract_page_text":
             if len(extracted_text) < 1500:
-                return decision
+                return RuntimeValidationResult(decision)
             return self._recoverable_validation_fail(
                 "Non-truncated page text was already extracted from the same page. "
                 "Prefer finishing with the evidence already collected, or use a "
-                "different interaction only when new content is clearly hidden."
+                "different interaction only when new content is clearly hidden.",
+                failure_kind=RuntimeValidationFailureKind.SUFFICIENT_SAME_PAGE_EVIDENCE,
             )
 
-        if self._count_currency_mentions(extracted_text) >= 4:
+        if (
+            self._task_looks_information_seeking(session.task.request)
+            and self._has_same_page_sufficient_evidence(session, observation)
+        ):
             return self._recoverable_validation_fail(
                 "Non-truncated page text from the same page already contains "
-                "multiple price or value mentions. Do not keep scrolling a "
-                "read-only listing without new evidence; prefer finishing with "
-                "the collected evidence or choosing a genuinely different action."
+                "enough concrete evidence to answer the information request. "
+                "Do not keep repeating read-only exploration without a clear "
+                "path to materially new evidence; prefer finishing with the "
+                "collected evidence or choosing a genuinely different action.",
+                failure_kind=RuntimeValidationFailureKind.SUFFICIENT_SAME_PAGE_EVIDENCE,
             )
 
-        return decision
+        return RuntimeValidationResult(decision)
 
     def _validate_redundant_information_refinement(
         self,
@@ -1893,27 +1933,27 @@ class RuntimeLoop:
         observation: AgentObservation | None,
         *,
         session: RuntimeSession | None = None,
-    ) -> PlannerDecision:
+    ) -> RuntimeValidationResult:
         if decision.decision_type not in {
             PlannerDecisionType.ACT,
             PlannerDecisionType.REQUEST_CONFIRMATION,
         }:
-            return decision
+            return RuntimeValidationResult(decision)
         if decision.chosen_skill not in {"click_element", "type_text", "select_option"}:
-            return decision
+            return RuntimeValidationResult(decision)
         if observation is None or session is None:
-            return decision
+            return RuntimeValidationResult(decision)
         if not self._task_looks_information_seeking(session.task.request):
-            return decision
-        if not self._has_same_page_rich_price_evidence(session, observation):
-            return decision
+            return RuntimeValidationResult(decision)
+        if not self._has_same_page_sufficient_evidence(session, observation):
+            return RuntimeValidationResult(decision)
 
         target_context = self._describe_interaction_target(
             decision=decision,
             observation=observation,
         )
         if not target_context:
-            return decision
+            return RuntimeValidationResult(decision)
 
         if (
             decision.chosen_skill == "type_text"
@@ -1922,19 +1962,22 @@ class RuntimeLoop:
             return self._recoverable_validation_fail(
                 "The current page already contains enough extracted evidence to answer "
                 "the information request. Do not use a search or filter input on the "
-                "same listing just to refine the results; prefer finishing with the "
-                "evidence already collected."
+                "same page just to refine the visible results; prefer finishing with "
+                "the evidence already collected.",
+                failure_kind=RuntimeValidationFailureKind.REDUNDANT_REFINEMENT,
             )
 
-        if self._looks_like_listing_refinement_control(target_context):
+        if self._looks_like_information_refinement_control(target_context):
             return self._recoverable_validation_fail(
                 "The current page already contains enough extracted evidence to answer "
-                "the information request. Do not click sort, filter, or search "
-                "refinement controls on the same listing; prefer finishing with the "
-                "evidence already collected."
+                "the information request. Do not click sort, filter, search, or other "
+                "refinement controls on the same page when they are unlikely to "
+                "materially change the answer; prefer finishing with the evidence "
+                "already collected.",
+                failure_kind=RuntimeValidationFailureKind.REDUNDANT_REFINEMENT,
             )
 
-        return decision
+        return RuntimeValidationResult(decision)
 
     def _count_currency_mentions(self, text: str) -> int:
         import re
@@ -2046,16 +2089,26 @@ class RuntimeLoop:
         info_keywords = (
             "find",
             "look up",
+            "tell me",
+            "read",
+            "summarize",
             "show",
             "list",
             "compare",
             "which",
             "what",
+            "when",
+            "where",
+            "who",
+            "details",
+            "information",
             "review",
             "inspect",
             "глянь",
             "найд",
             "поищ",
+            "прочит",
+            "сводк",
             "посмотр",
             "покаж",
             "спис",
@@ -2063,6 +2116,11 @@ class RuntimeLoop:
             "какие",
             "какой",
             "что",
+            "когда",
+            "где",
+            "кто",
+            "информац",
+            "детал",
             "сколько",
             "до ",
             "under ",
@@ -2072,23 +2130,207 @@ class RuntimeLoop:
             "цена",
             "дешев",
         )
-        return any(keyword in request_lower for keyword in info_keywords)
+        return "?" in request_lower or any(keyword in request_lower for keyword in info_keywords)
 
-    def _has_same_page_rich_price_evidence(
+    def _has_same_page_non_truncated_extraction(
         self,
         session: RuntimeSession,
         observation: AgentObservation,
-    ) -> bool:
+    ) -> str | None:
         planner_state = session.planner_state()
         extracted_text = (planner_state.latest_extracted_text or "").strip()
         if not extracted_text or planner_state.latest_extracted_text_truncated is True:
-            return False
+            return None
         if (
             planner_state.latest_extracted_text_url
             and planner_state.latest_extracted_text_url != observation.page_url
         ):
+            return None
+        return extracted_text
+
+    def _has_same_page_sufficient_evidence(
+        self,
+        session: RuntimeSession,
+        observation: AgentObservation,
+    ) -> bool:
+        extracted_text = self._has_same_page_non_truncated_extraction(session, observation)
+        if not extracted_text:
             return False
-        return self._count_currency_mentions(extracted_text) >= 3
+        return self._count_task_relevant_evidence_units(
+            session.task.request,
+            extracted_text,
+        ) >= 2
+
+    def _count_task_relevant_evidence_units(self, request: str, text: str) -> int:
+        import re
+
+        if not text.strip():
+            return 0
+
+        parts = [
+            " ".join(part.split()).strip(" -•\t\r\n")
+            for part in re.split(r"(?:[\r\n]+|(?<=[.!?;:])\s+)", text)
+        ]
+        return sum(
+            1
+            for part in parts
+            if self._text_chunk_is_task_relevant_evidence(request, part)
+        )
+
+    def _text_chunk_looks_concrete_evidence(self, text: str) -> bool:
+        import re
+
+        normalized = " ".join(text.split()).strip()
+        if len(normalized) < 12:
+            return False
+        if self._count_currency_mentions(normalized) > 0:
+            return True
+        if re.search(r"https?://|www\.|[\w.+-]+@[\w.-]+\.\w+", normalized, flags=re.IGNORECASE):
+            return True
+        if self._chunk_contains_date_or_time_fact(normalized):
+            return True
+        if re.search(r"\b\d+\s*(?:%|percent|процент|days?|day|hours?|hrs?|minutes?|mins?|"
+            r"дн(?:я|ей|\.?)|час(?:а|ов)?|мин(?:ут|\.?)|шт\.?|items?)\b",
+            normalized,
+            flags=re.IGNORECASE,
+        ):
+            return True
+        if self._chunk_contains_contact_fact(normalized):
+            return True
+        return False
+
+    def _text_chunk_is_task_relevant_evidence(self, request: str, text: str) -> bool:
+        normalized_request = request.lower()
+        normalized_text = " ".join(text.split()).strip().lower()
+        if not self._text_chunk_looks_concrete_evidence(normalized_text):
+            return False
+        if self._request_wants_price_facts(normalized_request):
+            return self._count_currency_mentions(normalized_text) > 0
+        if self._request_wants_schedule_or_contact_facts(normalized_request):
+            return self._chunk_contains_schedule_or_contact_fact(normalized_text)
+        if self._request_wants_current_page_fact_summary(normalized_request):
+            return (
+                self._count_currency_mentions(normalized_text) > 0
+                or self._chunk_contains_schedule_or_contact_fact(normalized_text)
+            )
+        return False
+
+    def _request_wants_price_facts(self, request_lower: str) -> bool:
+        price_keywords = (
+            "budget",
+            "cheapest",
+            "price",
+            "prices",
+            "under ",
+            "cost",
+            "цена",
+            "цены",
+            "стоим",
+            "дешев",
+            "до ",
+        )
+        return any(keyword in request_lower for keyword in price_keywords)
+
+    def _request_wants_schedule_or_contact_facts(self, request_lower: str) -> bool:
+        detail_keywords = (
+            "deadline",
+            "deadlines",
+            "date",
+            "dates",
+            "time",
+            "times",
+            "hours",
+            "schedule",
+            "contact",
+            "contacts",
+            "phone",
+            "email",
+            "support",
+            "filing",
+            "application",
+            "applications",
+            "submit",
+            "processing",
+            "office",
+            "rule",
+            "rules",
+            "details",
+            "information",
+            "срок",
+            "дата",
+            "время",
+            "часы",
+            "график",
+            "контакт",
+            "телефон",
+            "почт",
+            "поддержк",
+            "подач",
+            "заявлен",
+            "рассмотр",
+            "прием",
+            "правил",
+            "детал",
+            "информац",
+        )
+        return any(keyword in request_lower for keyword in detail_keywords)
+
+    def _request_wants_current_page_fact_summary(self, request_lower: str) -> bool:
+        summary_keywords = (
+            "read",
+            "summarize",
+            "review",
+            "inspect",
+            "show me",
+            "прочит",
+            "сводк",
+            "посмотр",
+            "обзор",
+            "опиши",
+        )
+        page_keywords = (
+            "this page",
+            "current page",
+            "shown on this page",
+            "same page",
+            "page",
+            "на этой странице",
+            "на странице",
+            "с этой страницы",
+            "страниц",
+        )
+        return any(keyword in request_lower for keyword in summary_keywords) and any(
+            keyword in request_lower for keyword in page_keywords
+        )
+
+    def _chunk_contains_schedule_or_contact_fact(self, text: str) -> bool:
+        return self._chunk_contains_date_or_time_fact(text) or self._chunk_contains_contact_fact(
+            text
+        )
+
+    def _chunk_contains_date_or_time_fact(self, text: str) -> bool:
+        import re
+
+        return bool(
+            re.search(r"\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b", text)
+            or re.search(r"\b\d{4}-\d{2}-\d{2}\b", text)
+            or re.search(r"\b\d{1,2}:\d{2}(?:\s*[-–]\s*\d{1,2}:\d{2})?\b", text)
+            or re.search(
+                r"\b\d+\s*(?:days?|day|hours?|hrs?|minutes?|mins?|"
+                r"дн(?:я|ей|\.?)|час(?:а|ов)?|мин(?:ут|\.?))\b",
+                text,
+                flags=re.IGNORECASE,
+            )
+        )
+
+    def _chunk_contains_contact_fact(self, text: str) -> bool:
+        import re
+
+        return bool(
+            re.search(r"\+\d[\d()\-\s]{6,}", text)
+            or re.search(r"[\w.+-]+@[\w.-]+\.\w+", text)
+            or re.search(r"https?://|www\.", text, flags=re.IGNORECASE)
+        )
 
     def _describe_interaction_target(
         self,
@@ -2175,20 +2417,28 @@ class RuntimeLoop:
             "find",
             "query",
             "filter",
+            "refine",
+            "narrow",
             "искать",
             "поиск",
             "найти",
             "фильтр",
+            "уточн",
+            "суз",
         )
         return any(keyword in text for keyword in keywords)
 
-    def _looks_like_listing_refinement_control(self, text: str) -> bool:
+    def _looks_like_information_refinement_control(self, text: str) -> bool:
         keywords = (
             "search",
             "find",
             "query",
             "filter",
             "sort",
+            "order",
+            "refine",
+            "narrow",
+            "apply",
             "price",
             "best price",
             "low to high",
@@ -2200,6 +2450,10 @@ class RuntimeLoop:
             "найти",
             "фильтр",
             "сорт",
+            "упоряд",
+            "уточн",
+            "суз",
+            "примен",
             "цена",
             "лучшая цена",
             "дешев",
@@ -2211,12 +2465,10 @@ class RuntimeLoop:
 
     def _looks_like_generic_text_selector(self, selector: str) -> bool:
         """Check if selector appears to be a generic text-based selector."""
-        import re
-
         selector_lower = selector.lower().strip()
 
-        # text="..." patterns
-        if re.match(r'^text=["\']', selector_lower):
+        # text-based Playwright selectors
+        if self._extract_text_selector_query(selector) is not None:
             return True
 
         # role=... patterns without specific name
@@ -2231,16 +2483,13 @@ class RuntimeLoop:
         element: InteractiveElement,
     ) -> bool:
         """Check if a text-based selector likely matches an element."""
-        import re
-
         selector_lower = selector.lower()
         element_text = (element.text or "").lower()
         element_label = (element.label or "").lower()
 
-        # Extract text from text="..." pattern
-        match = re.search(r'text=["\'](.+?)["\']', selector, re.IGNORECASE)
-        if match:
-            search_text = match.group(1).lower()
+        search_text = self._extract_text_selector_query(selector)
+        if search_text is not None:
+            search_text = search_text.lower()
             return search_text in element_text or search_text in element_label
 
         # For non-text selectors, check if selector is contained in element identifiers
@@ -2255,15 +2504,13 @@ class RuntimeLoop:
         observation: AgentObservation,
     ) -> int:
         """Count how many observed elements match the selector."""
-        import re
-
         count = 0
 
-        match = re.search(r'text=["\'](.+?)["\']', selector, re.IGNORECASE)
-        if not match:
+        search_text = self._extract_text_selector_query(selector)
+        if search_text is None:
             return 0
 
-        search_text = match.group(1).lower()
+        search_text = search_text.lower()
 
         for element in observation.interactive_elements:
             element_text = (element.text or "").lower()
@@ -2272,6 +2519,24 @@ class RuntimeLoop:
                 count += 1
 
         return count
+
+    def _extract_text_selector_query(self, selector: str) -> str | None:
+        """Extract the human-visible text targeted by common Playwright text selector forms."""
+        import re
+
+        patterns = (
+            r'text=["\'](.+?)["\']',
+            r':has-text\(["\'](.+?)["\']\)',
+            r':text\(["\'](.+?)["\']\)',
+            r':text-is\(["\'](.+?)["\']\)',
+        )
+        for pattern in patterns:
+            match = re.search(pattern, selector, re.IGNORECASE)
+            if match:
+                query = match.group(1).strip()
+                if query:
+                    return query
+        return None
 
     def _history_line(
         self,

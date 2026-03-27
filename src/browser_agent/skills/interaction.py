@@ -65,21 +65,21 @@ def _resolve_text_target(
 class ClickElementInput(BaseModel):
     """Input contract for clicking an element.
 
-    Either `selector` or `element_id` must be provided (at least one required).
-    ALWAYS prefer `element_id` when the element is in the current observation.
+    Prefer `element_id` when the target is present in the current observation.
+    Use `selector` only as a fallback when the target is not observed.
     """
 
     element_id: str | None = Field(
         default=None,
-        description="PREFERRED: Element ID from current observation (e.g., 'element_abc123'). Use this when the target element appears in the observation's interactive_elements list. This ensures precise targeting.",
+        description="Primary target. Use the exact observed `element_id` from the current page when available.",
     )
     selector: str | None = Field(
         default=None,
-        description="FALLBACK ONLY: CSS or Playwright selector. Only use when element_id is not in observation. Avoid generic text selectors for repeated controls because they are ambiguous.",
+        description="Fallback CSS or Playwright selector only when no reliable observed `element_id` is available. Avoid broad or text-only selectors when multiple controls may match.",
     )
     element_name: str | None = Field(
         default=None,
-        description="Human-readable name for the element (optional, for logging).",
+        description="Optional label for logs only. Not used for targeting or matching.",
     )
 
     @model_validator(mode="after")
@@ -101,7 +101,7 @@ class ClickElementSkill(BaseSkill):
     """Click a single interactive element."""
 
     name = "click_element"
-    description = "Click a target element using a selector."
+    description = "Click one intended control. Prefer observed `element_id`; use `selector` only as a fallback when the target is not reliably observed."
     input_schema = ClickElementInput
     output_schema = ClickElementOutput
 
@@ -140,26 +140,26 @@ class ClickElementSkill(BaseSkill):
 class TypeTextInput(BaseModel):
     """Input contract for entering text into an element.
 
-    Either `selector` or `element_id` must be provided (at least one required).
-    ALWAYS prefer `element_id` when the element is in the current observation.
+    Prefer `element_id` when the target is present in the current observation.
+    Use `field_id` for observed form fields and `selector` only as a fallback.
     """
 
     element_id: str | None = Field(
         default=None,
-        description="PREFERRED: Element ID from current observation. Use this when the target input appears in the observation. This ensures precise targeting.",
+        description="Primary target for an observed editable control. Use the exact visible `element_id` when available.",
     )
     selector: str | None = Field(
         default=None,
-        description="FALLBACK ONLY: CSS or Playwright selector. Only use when element_id is not in observation.",
+        description="Fallback CSS or Playwright selector only when no reliable observed `element_id` or `field_id` is available. Avoid broad selectors that may hit the wrong field.",
     )
     field_id: str | None = Field(
         default=None,
-        description="Field ID from current observation form_fields. Use when the target is shown as a form field instead of an interactive element.",
+        description="Observed form field identifier from `form_fields`. Prefer this over guessing a selector for form inputs.",
     )
-    text: str = Field(description="Text to type into the element.")
-    clear_first: bool = Field(default=True, description="Clear existing text before typing.")
-    submit: bool = Field(default=False, description="Press Enter after typing.")
-    sensitive: bool = Field(default=False, description="Mark as sensitive (will be masked in logs).")
+    text: str = Field(description="Literal text to enter into the target control.")
+    clear_first: bool = Field(default=True, description="Clear the existing value before typing. Use `False` only when appending is intentional.")
+    submit: bool = Field(default=False, description="Press Enter after typing only when submission or confirmation is the intended next action.")
+    sensitive: bool = Field(default=False, description="Set to `True` for secrets or personal data so logs mask the value.")
 
     @model_validator(mode="after")
     def validate_target(self) -> "TypeTextInput":
@@ -183,7 +183,7 @@ class TypeTextSkill(BaseSkill):
     """Type text into an editable control."""
 
     name = "type_text"
-    description = "Type text into a field or editable region."
+    description = "Enter text into one intended field. Prefer observed `field_id` or `element_id`, mark sensitive values, and avoid typing into search or filter inputs unless the task needs it."
     input_schema = TypeTextInput
     output_schema = TypeTextOutput
 
@@ -234,26 +234,25 @@ class TypeTextSkill(BaseSkill):
 class SelectOptionInput(BaseModel):
     """Input contract for selecting an option from a dropdown.
 
-    Either `selector` or `element_id` must be provided (at least one required).
-    Either `option_value` or `option_text` must be provided (at least one required).
-    ALWAYS prefer `element_id` when the select element is in the current observation.
+    Prefer `element_id` when the select control is present in the current observation.
+    Provide `option_value` or `option_text` for an actual option from that control.
     """
 
     element_id: str | None = Field(
         default=None,
-        description="PREFERRED: Element ID from current observation. Use this when the select element appears in the observation. This ensures precise targeting.",
+        description="Primary target for an observed select control. Use the exact visible `element_id` when available.",
     )
     selector: str | None = Field(
         default=None,
-        description="FALLBACK ONLY: CSS or Playwright selector. Only use when element_id is not in observation.",
+        description="Fallback CSS or Playwright selector only when no reliable observed `element_id` is available.",
     )
     option_value: str | None = Field(
         default=None,
-        description="Option value to select. REQUIRED if option_text is not provided.",
+        description="Preferred option identifier when known. Use an actual option `value` from the target control.",
     )
     option_text: str | None = Field(
         default=None,
-        description="Visible text of option to select. REQUIRED if option_value is not provided.",
+        description="Fallback visible option label. Use an exact label from the target control when `option_value` is not known.",
     )
 
     @model_validator(mode="after")
@@ -279,7 +278,7 @@ class SelectOptionSkill(BaseSkill):
     """Select an option from a dropdown or select element."""
 
     name = "select_option"
-    description = "Select an option from a dropdown/select element by value or visible text."
+    description = "Select one option in a dropdown. Prefer observed `element_id`; prefer `option_value` over visible text when both are possible."
     input_schema = SelectOptionInput
     output_schema = SelectOptionOutput
 
@@ -325,18 +324,18 @@ class SelectOptionSkill(BaseSkill):
 class PressKeyInput(BaseModel):
     """Input contract for pressing a keyboard key.
 
-    Either `selector` or `element_id` can be provided to target a specific element.
-    ALWAYS prefer `element_id` when the element is in the current observation.
+    Prefer `element_id` when the target is present in the current observation.
+    Leave both targeting fields empty for a global key press.
     """
 
-    key: str = Field(description="Key to press (e.g., 'Enter', 'Escape', 'Tab').")
+    key: str = Field(description="Key to press, for example `Enter`, `Escape`, or `Tab`. Use the smallest key action that advances the task.")
     element_id: str | None = Field(
         default=None,
-        description="PREFERRED: Element ID from current observation. Use this when the target element appears in the observation. Leave empty for global key press.",
+        description="Primary target for a focused key press. Use the exact visible `element_id` when available.",
     )
     selector: str | None = Field(
         default=None,
-        description="FALLBACK ONLY: CSS or Playwright selector. Only use when element_id is not in observation. Leave empty for global key press.",
+        description="Fallback CSS or Playwright selector only when no reliable observed `element_id` is available. Leave empty for a global key press.",
     )
 
 
@@ -354,7 +353,7 @@ class PressKeySkill(BaseSkill):
     """Press a keyboard key, optionally targeting a specific element."""
 
     name = "press_key"
-    description = "Press a keyboard key like Enter, Escape, Tab, etc. Can target a specific element or send globally."
+    description = "Press a keyboard key as a focused action. Prefer observed `element_id` for targeted input; use a global press only when page-level handling is intended."
     input_schema = PressKeyInput
     output_schema = PressKeyOutput
 

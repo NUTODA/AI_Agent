@@ -56,6 +56,8 @@ class TestElementTargetingValidation:
         assert loop._looks_like_generic_text_selector('text="Submit"') is True
         assert loop._looks_like_generic_text_selector("text='Submit'") is True
         assert loop._looks_like_generic_text_selector('text="Mark Spam"') is True
+        assert loop._looks_like_generic_text_selector('a:has-text("Submit")') is True
+        assert loop._looks_like_generic_text_selector('button:text-is("Submit")') is True
 
         # Should not detect other patterns
         assert loop._looks_like_generic_text_selector('[data-testid="submit"]') is False
@@ -89,9 +91,11 @@ class TestElementTargetingValidation:
         # Should match
         assert loop._selector_matches_element('text="Mark Spam"', element) is True
         assert loop._selector_matches_element("text='Mark Spam'", element) is True
+        assert loop._selector_matches_element('a:has-text("Mark Spam")', element) is True
 
         # Should not match
         assert loop._selector_matches_element('text="Add to Cart"', element) is False
+        assert loop._selector_matches_element('a:has-text("Add to Cart")', element) is False
 
     def test_count_matching_observed_elements_counts_matches(self) -> None:
         """_count_matching_observed_elements should count matching elements."""
@@ -129,6 +133,7 @@ class TestElementTargetingValidation:
 
         # Should count both "Add to Cart" buttons
         assert loop._count_matching_observed_elements('text="Add to Cart"', observation) == 2
+        assert loop._count_matching_observed_elements('a:has-text("Add to Cart")', observation) == 2
 
         # Should count one "Submit" button
         assert loop._count_matching_observed_elements('text="Submit"', observation) == 1
@@ -165,9 +170,50 @@ class TestElementTargetingValidation:
         result = loop._validate_element_targeting(decision, observation)
 
         # Should be converted to a fail decision
-        assert result.decision_type == PlannerDecisionType.FAIL
-        assert "element_abc123" in (result.failure_reason or "")
-        assert "element_id" in (result.failure_reason or "").lower()
+        assert result.decision.decision_type == PlannerDecisionType.FAIL
+        assert "element_abc123" in (result.decision.failure_reason or "")
+        assert "element_id" in (result.decision.failure_reason or "").lower()
+        assert result.failure_kind is not None
+
+    def test_validate_element_targeting_rejects_has_text_selector_when_element_id_available(self) -> None:
+        """Validation should reject :has-text selectors when observed elements already have element_id."""
+        loop = create_mock_loop()
+
+        observation = AgentObservation(
+            summary="Search results",
+            interactive_elements=[
+                InteractiveElement(
+                    element_id="element_spb_1",
+                    label="Санкт-Петербург (север)",
+                    tag="a",
+                    role="link",
+                    text="Санкт-Петербург (север)",
+                    selector='tbody > tr:nth-of-type(1) > td:nth-of-type(1) > a',
+                ),
+                InteractiveElement(
+                    element_id="element_spb_2",
+                    label="Санкт-Петербург (юг)",
+                    tag="a",
+                    role="link",
+                    text="Санкт-Петербург (юг)",
+                    selector='tbody > tr:nth-of-type(2) > td:nth-of-type(1) > a',
+                ),
+            ],
+        )
+
+        decision = PlannerDecision(
+            decision_type=PlannerDecisionType.ACT,
+            rationale="Click the matching city result.",
+            chosen_skill="click_element",
+            skill_input={"selector": 'a:has-text("Санкт-Петербург")'},
+            expected_outcome="The city weather page opens.",
+        )
+
+        result = loop._validate_element_targeting(decision, observation)
+
+        assert result.decision.decision_type == PlannerDecisionType.FAIL
+        assert "element_id" in (result.decision.failure_reason or "").lower()
+        assert result.failure_kind is not None
 
     def test_validate_element_targeting_allows_element_id_usage(self) -> None:
         """Validation should allow decision with element_id."""
@@ -198,8 +244,8 @@ class TestElementTargetingValidation:
         result = loop._validate_element_targeting(decision, observation)
 
         # Should remain an act decision
-        assert result.decision_type == PlannerDecisionType.ACT
-        assert result.chosen_skill == "click_element"
+        assert result.decision.decision_type == PlannerDecisionType.ACT
+        assert result.decision.chosen_skill == "click_element"
 
     def test_validate_element_targeting_rejects_redundant_navigation_click_after_full_text_extraction(self) -> None:
         """Navigation-like clicks should be blocked once the same page text is already extracted."""
@@ -255,8 +301,8 @@ class TestElementTargetingValidation:
             session=session,
         )
 
-        assert result.decision_type == PlannerDecisionType.FAIL
-        assert "redundant click" in (result.failure_reason or "").lower()
+        assert result.decision.decision_type == PlannerDecisionType.FAIL
+        assert "redundant click" in (result.decision.failure_reason or "").lower()
 
     def test_validate_element_targeting_allows_click_after_scroll_following_read(self) -> None:
         """A follow-up click after scrolling should not be blocked as a redundant reread."""
@@ -319,7 +365,7 @@ class TestElementTargetingValidation:
             session=session,
         )
 
-        assert result.decision_type == PlannerDecisionType.ACT
+        assert result.decision.decision_type == PlannerDecisionType.ACT
 
     def test_validate_element_targeting_allows_domain_like_result_controls_after_read(self) -> None:
         """Search-result domain controls should not be treated as redundant rereads."""
@@ -373,7 +419,7 @@ class TestElementTargetingValidation:
             session=session,
         )
 
-        assert result.decision_type == PlannerDecisionType.ACT
+        assert result.decision.decision_type == PlannerDecisionType.ACT
 
     def test_validate_element_targeting_allows_drilldown_click_after_extract(self) -> None:
         """Catalog drill-down clicks should not be blocked just because item text appears in extracted text."""
@@ -426,7 +472,7 @@ class TestElementTargetingValidation:
             session=session,
         )
 
-        assert result.decision_type == PlannerDecisionType.ACT
+        assert result.decision.decision_type == PlannerDecisionType.ACT
 
     def test_validate_element_targeting_rejects_ambiguous_selector(self) -> None:
         """Validation should reject selector matching multiple elements.
@@ -470,10 +516,10 @@ class TestElementTargetingValidation:
 
         # Should be converted to a fail decision
         # Note: The policy violation (element_id available) is caught before ambiguity check
-        assert result.decision_type == PlannerDecisionType.FAIL
-        assert "element_id" in (result.failure_reason or "").lower()
+        assert result.decision.decision_type == PlannerDecisionType.FAIL
+        assert "element_id" in (result.decision.failure_reason or "").lower()
         # The selector matches multiple elements, but the policy violation is caught first
-        assert "element_1" in (result.failure_reason or "") or "element_2" in (result.failure_reason or "")
+        assert "element_1" in (result.decision.failure_reason or "") or "element_2" in (result.decision.failure_reason or "")
 
     def test_validate_element_targeting_skips_non_targeting_skills(self) -> None:
         """Validation should skip non-element-targeting skills."""
@@ -505,8 +551,8 @@ class TestElementTargetingValidation:
         result = loop._validate_element_targeting(decision, observation)
 
         # Should remain unchanged
-        assert result.decision_type == PlannerDecisionType.ACT
-        assert result.chosen_skill == "navigate"
+        assert result.decision.decision_type == PlannerDecisionType.ACT
+        assert result.decision.chosen_skill == "navigate"
 
     def test_validate_element_targeting_allows_fallback_selector_for_unobserved_elements(self) -> None:
         """Validation should allow selector when element is NOT in observation."""
@@ -529,7 +575,7 @@ class TestElementTargetingValidation:
         result = loop._validate_element_targeting(decision, observation)
 
         # Should remain an act decision since element is not in observation
-        assert result.decision_type == PlannerDecisionType.ACT
+        assert result.decision.decision_type == PlannerDecisionType.ACT
 
 
 class TestElementIdResolution:
@@ -723,8 +769,8 @@ class TestSkillFieldDescriptions:
         element_id_desc = schema["properties"]["element_id"].get("description", "")
         selector_desc = schema["properties"]["selector"].get("description", "")
 
-        assert "PREFERRED" in element_id_desc
-        assert "FALLBACK" in selector_desc
+        assert "primary" in element_id_desc.lower()
+        assert "fallback" in selector_desc.lower()
 
     def test_type_text_prefers_element_id_in_description(self) -> None:
         """TypeTextInput should emphasize element_id preference."""
@@ -734,8 +780,8 @@ class TestSkillFieldDescriptions:
         element_id_desc = schema["properties"]["element_id"].get("description", "")
         selector_desc = schema["properties"]["selector"].get("description", "")
 
-        assert "PREFERRED" in element_id_desc
-        assert "FALLBACK" in selector_desc
+        assert "primary" in element_id_desc.lower()
+        assert "fallback" in selector_desc.lower()
 
     def test_select_option_prefers_element_id_in_description(self) -> None:
         """SelectOptionInput should emphasize element_id preference."""
@@ -745,8 +791,8 @@ class TestSkillFieldDescriptions:
         element_id_desc = schema["properties"]["element_id"].get("description", "")
         selector_desc = schema["properties"]["selector"].get("description", "")
 
-        assert "PREFERRED" in element_id_desc
-        assert "FALLBACK" in selector_desc
+        assert "primary" in element_id_desc.lower()
+        assert "fallback" in selector_desc.lower()
 
     def test_press_key_prefers_element_id_in_description(self) -> None:
         """PressKeyInput should emphasize element_id preference."""
@@ -756,5 +802,5 @@ class TestSkillFieldDescriptions:
         element_id_desc = schema["properties"]["element_id"].get("description", "")
         selector_desc = schema["properties"]["selector"].get("description", "")
 
-        assert "PREFERRED" in element_id_desc
-        assert "FALLBACK" in selector_desc
+        assert "primary" in element_id_desc.lower()
+        assert "fallback" in selector_desc.lower()
