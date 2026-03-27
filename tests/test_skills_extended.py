@@ -11,7 +11,9 @@ from unittest.mock import MagicMock
 import pytest
 
 from browser_agent.browser.engine import BrowserOperationResult, StubBrowserEngine
-from browser_agent.runtime.models import AgentObservation
+from browser_agent.runtime.models import AgentObservation, FormFieldSummary, UserTask
+from browser_agent.config import RuntimeSettings
+from browser_agent.runtime.session import RuntimeSession
 from browser_agent.skills.base import SkillContext
 from browser_agent.skills.dialog import (
     InspectDialogInput,
@@ -30,6 +32,8 @@ from browser_agent.skills.interaction import (
     SelectOptionInput,
     SelectOptionOutput,
     SelectOptionSkill,
+    TypeTextInput,
+    TypeTextSkill,
 )
 from browser_agent.skills.navigation import (
     ScrollViewportInput,
@@ -112,6 +116,95 @@ class TestSelectOptionSkillContract:
         assert output.target == "#country"
         assert output.selected_value == "us"
         assert output.selected_text == "United States"
+
+
+class TestTypeTextSkillContract:
+    """Test the type_text skill input/output contracts."""
+
+    def test_input_schema_accepts_field_id(self) -> None:
+        input_data = TypeTextInput(field_id="field_city_search", text="Санкт")
+        assert input_data.field_id == "field_city_search"
+        assert input_data.text == "Санкт"
+
+    def test_type_text_resolves_field_id_from_latest_observation(self) -> None:
+        browser = MagicMock()
+        browser.type_text.return_value = BrowserOperationResult(
+            message="Typed text.",
+            metadata={"resolved_target": 'input[id="mat-input-0"]'},
+        )
+        session = RuntimeSession(
+            task=UserTask(request="Select Saint Petersburg"),
+            settings=RuntimeSettings(max_steps=3),
+        )
+        session.add_observation(
+            AgentObservation(
+                summary="City picker is visible.",
+                form_fields=[
+                    FormFieldSummary(
+                        field_id="field_city_search",
+                        label="Поиск",
+                        selector='input[id="mat-input-0"]',
+                        field_type="text",
+                    )
+                ],
+            )
+        )
+        context = SkillContext(
+            session=session,
+            browser=browser,
+            trace_recorder=MagicMock(),
+            safety_guardrails=MagicMock(),
+            confirmation_manager=MagicMock(),
+        )
+
+        output = TypeTextSkill().execute(
+            context,
+            TypeTextInput(field_id="field_city_search", text="Санкт"),
+        )
+
+        browser.type_text.assert_called_once_with(
+            'input[id="mat-input-0"]',
+            "Санкт",
+            clear_first=True,
+            submit=False,
+        )
+        assert output.target == 'input[id="mat-input-0"]'
+
+    def test_type_text_treats_field_like_element_id_as_field_reference(self) -> None:
+        browser = MagicMock()
+        browser.type_text.return_value = BrowserOperationResult(message="Typed text.")
+        session = RuntimeSession(
+            task=UserTask(request="Select Saint Petersburg"),
+            settings=RuntimeSettings(max_steps=3),
+        )
+        session.add_observation(
+            AgentObservation(
+                summary="City picker is visible.",
+                form_fields=[
+                    FormFieldSummary(
+                        field_id="field_city_search",
+                        label="Поиск",
+                        selector='input[id="mat-input-0"]',
+                        field_type="text",
+                    )
+                ],
+            )
+        )
+        context = SkillContext(
+            session=session,
+            browser=browser,
+            trace_recorder=MagicMock(),
+            safety_guardrails=MagicMock(),
+            confirmation_manager=MagicMock(),
+        )
+
+        output = TypeTextSkill().execute(
+            context,
+            TypeTextInput(element_id="field_city_search", text="Санкт"),
+        )
+
+        browser.type_text.assert_called_once()
+        assert output.target == 'input[id="mat-input-0"]'
 
 
 class TestScrollViewportSkillContract:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field, model_validator
 
-from browser_agent.runtime.models import AgentObservation
+from browser_agent.runtime.models import AgentObservation, FormFieldSummary
 from browser_agent.skills.base import (
     BaseSkill,
     SkillContext,
@@ -18,6 +18,48 @@ def _resolve_target(selector: str | None, element_id: str | None) -> str:
     if target is None:
         raise ValueError("One of `selector` or `element_id` must be provided.")
     return target
+
+
+def _find_form_field_by_id(
+    observation: AgentObservation | None,
+    field_id: str,
+) -> FormFieldSummary | None:
+    if observation is None:
+        return None
+    for field in observation.form_fields:
+        if field.field_id == field_id:
+            return field
+    return None
+
+
+def _resolve_text_target(
+    context: SkillContext,
+    *,
+    selector: str | None,
+    element_id: str | None,
+    field_id: str | None,
+) -> str:
+    if field_id:
+        field = _find_form_field_by_id(context.session.latest_observation, field_id)
+        if field is None or not field.selector:
+            raise SkillExecutionError(
+                message=f"Form field reference `{field_id}` is no longer available.",
+                error_code="field_reference_not_found",
+                data={"field_id": field_id},
+            )
+        return field.selector
+
+    if element_id and element_id.startswith("field_"):
+        field = _find_form_field_by_id(context.session.latest_observation, element_id)
+        if field is None or not field.selector:
+            raise SkillExecutionError(
+                message=f"Form field reference `{element_id}` is no longer available.",
+                error_code="field_reference_not_found",
+                data={"field_id": element_id},
+            )
+        return field.selector
+
+    return _resolve_target(selector, element_id)
 
 
 class ClickElementInput(BaseModel):
@@ -110,6 +152,10 @@ class TypeTextInput(BaseModel):
         default=None,
         description="FALLBACK ONLY: CSS or Playwright selector. Only use when element_id is not in observation.",
     )
+    field_id: str | None = Field(
+        default=None,
+        description="Field ID from current observation form_fields. Use when the target is shown as a form field instead of an interactive element.",
+    )
     text: str = Field(description="Text to type into the element.")
     clear_first: bool = Field(default=True, description="Clear existing text before typing.")
     submit: bool = Field(default=False, description="Press Enter after typing.")
@@ -117,7 +163,8 @@ class TypeTextInput(BaseModel):
 
     @model_validator(mode="after")
     def validate_target(self) -> "TypeTextInput":
-        _resolve_target(self.selector, self.element_id)
+        if self.field_id is None:
+            _resolve_target(self.selector, self.element_id)
         return self
 
 
@@ -145,7 +192,12 @@ class TypeTextSkill(BaseSkill):
         context: SkillContext,
         payload: TypeTextInput,
     ) -> TypeTextOutput:
-        target = _resolve_target(payload.selector, payload.element_id)
+        target = _resolve_text_target(
+            context,
+            selector=payload.selector,
+            element_id=payload.element_id,
+            field_id=payload.field_id,
+        )
         try:
             result = raise_for_browser_result(
                 context.browser.type_text(
