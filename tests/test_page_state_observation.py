@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from browser_agent.browser.engine import PlaywrightBrowserEngine
+import pytest
+
+from browser_agent.browser.engine import BrowserRuntimeError, PlaywrightBrowserEngine
 from browser_agent.browser.page_state import (
     ElementRole,
     FormFieldState,
@@ -95,3 +97,78 @@ def test_engine_builds_stable_snapshot_ids_for_same_element_signature() -> None:
 
     assert first_element.element_id == second_element.element_id
     assert first_field.field_id == second_field.field_id
+
+
+def test_engine_retries_transient_observation_errors() -> None:
+    engine = PlaywrightBrowserEngine()
+
+    class FakePage:
+        def __init__(self) -> None:
+            self.url = "https://example.com/catalog"
+            self.evaluate_calls = 0
+            self.wait_for_load_state_calls = 0
+            self.wait_for_timeout_calls = 0
+
+        def evaluate(self, script, args):
+            del script, args
+            self.evaluate_calls += 1
+            if self.evaluate_calls == 1:
+                raise RuntimeError(
+                    "Execution context was destroyed, most likely because of a navigation."
+                )
+            return {
+                "url": self.url,
+                "title": "Catalog",
+                "text_excerpt": "Affordable sets are visible.",
+                "interactive_elements": [],
+                "form_fields": [],
+                "metadata": {"document_ready_state": "complete"},
+            }
+
+        def title(self) -> str:
+            return "Catalog"
+
+        def wait_for_load_state(self, state: str, timeout: int) -> None:
+            assert state == "domcontentloaded"
+            assert timeout > 0
+            self.wait_for_load_state_calls += 1
+
+        def wait_for_timeout(self, timeout_ms: int) -> None:
+            assert timeout_ms > 0
+            self.wait_for_timeout_calls += 1
+
+    fake_page = FakePage()
+    engine.get_page = lambda: fake_page  # type: ignore[method-assign]
+
+    page_state = engine.observe_page()
+
+    assert fake_page.evaluate_calls == 2
+    assert fake_page.wait_for_load_state_calls == 1
+    assert fake_page.wait_for_timeout_calls == 1
+    assert page_state.title == "Catalog"
+    assert page_state.url == "https://example.com/catalog"
+    assert page_state.metadata["observation_retry_count"] == 1
+
+
+def test_engine_preserves_non_transient_observation_failures() -> None:
+    engine = PlaywrightBrowserEngine()
+
+    class FakePage:
+        url = "https://example.com/catalog"
+
+        def evaluate(self, script, args):
+            del script, args
+            raise RuntimeError("ReferenceError: snapshot helper is not defined")
+
+        def title(self) -> str:
+            return "Catalog"
+
+    fake_page = FakePage()
+    engine.get_page = lambda: fake_page  # type: ignore[method-assign]
+
+    with pytest.raises(BrowserRuntimeError) as exc_info:
+        engine.observe_page()
+
+    assert exc_info.value.code == "page_observation_failed"
+    assert "snapshot helper is not defined" in exc_info.value.metadata["details"]
+    assert exc_info.value.metadata["retry_count"] == 0

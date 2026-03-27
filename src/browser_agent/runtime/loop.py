@@ -1587,12 +1587,29 @@ class RuntimeLoop:
             PlannerDecisionType.REQUEST_CONFIRMATION,
         }:
             return decision
-        if decision.chosen_skill not in {"scroll_viewport", "extract_page_text"}:
+        if decision.chosen_skill not in {
+            "scroll_viewport",
+            "extract_page_text",
+            "get_interactive_elements",
+            "observe_page",
+        }:
             return decision
         if observation is None or session is None:
             return decision
 
         planner_state = session.planner_state()
+        if (
+            decision.chosen_skill in {"get_interactive_elements", "observe_page"}
+            and planner_state.latest_action_name == decision.chosen_skill
+            and planner_state.latest_url == observation.page_url
+            and planner_state.latest_tool_status == ToolExecutionStatus.SUCCESS
+        ):
+            return self._recoverable_validation_fail(
+                f"The current observation already includes the result of the most recent "
+                f"`{decision.chosen_skill}` call on this page. Do not repeat the same "
+                "read-only inspection step without a new interaction."
+            )
+
         extracted_text = (planner_state.latest_extracted_text or "").strip()
         if not extracted_text or planner_state.latest_extracted_text_truncated is True:
             return decision

@@ -157,6 +157,26 @@ class RedundantExplorationThenFinishPlanner:
         )
 
 
+class RepeatedElementScanThenFinishPlanner:
+    """Repeat get_interactive_elements once, then finish after runtime replan."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def decide(self, planner_context) -> PlannerDecision:
+        del planner_context
+        self.calls += 1
+        if self.calls == 1:
+            return act_decision(
+                skill="get_interactive_elements",
+                skill_input={"max_elements": 120},
+                rationale="Collect the interactive elements again.",
+                expected_outcome="The runtime captures more controls from the same page.",
+                progress_assessment=PlannerProgressState.NO_PROGRESS,
+            )
+        return finish_decision("The existing observation already had the needed controls.")
+
+
 class FailingClickBrowser(StubBrowserEngine):
     """Stub browser that returns a structured click failure."""
 
@@ -381,6 +401,103 @@ def test_runtime_loop_replans_after_redundant_exploration_validation(tmp_path) -
     assert any(
         "rejected by runtime validation" in line
         and "multiple price or value mentions" in line
+        for line in session.execution_history_summary
+    )
+
+
+def test_runtime_loop_replans_after_repeated_get_interactive_elements(tmp_path) -> None:
+    settings = RuntimeSettings(
+        trace_dir=tmp_path / "traces",
+        artifact_dir=tmp_path / "artifacts",
+        max_steps=4,
+    )
+    browser = StubBrowserEngine(
+        initial_state=PageState(
+            url="https://example.com/catalog",
+            title="Catalog",
+            summary="Catalog page.",
+            text_excerpt="Catalog content is visible.",
+            interactive_elements=[
+                InteractiveElementState(
+                    element_id="element_sets",
+                    name="Наборы",
+                    tag="a",
+                    role=ElementRole.LINK,
+                    selector='a[href="/menu/nabory"]',
+                    text="Наборы",
+                    clickable=True,
+                    attributes={"href": "/menu/nabory"},
+                )
+            ],
+        )
+    )
+    session = RuntimeSession(
+        task=UserTask(request="Inspect the visible controls"),
+        settings=settings,
+    )
+    session.add_observation(
+        AgentObservation(
+            page_url="https://example.com/catalog",
+            page_title="Catalog",
+            summary="Catalog page.",
+            visible_text_excerpt="Catalog content is visible.",
+            interactive_elements=[
+                InteractiveElement(
+                    element_id="element_sets",
+                    label="Наборы",
+                    tag="a",
+                    role="link",
+                    selector='a[href="/menu/nabory"]',
+                    text="Наборы",
+                    is_clickable=True,
+                    attributes={"href": "/menu/nabory"},
+                )
+            ],
+        )
+    )
+    session.add_action(
+        AgentAction(
+            tool_name="get_interactive_elements",
+            rationale="Collect the controls.",
+            parameters={"max_elements": 120},
+            expected_outcome="The visible controls are captured.",
+        )
+    )
+    session.add_tool_result(
+        ToolResult(
+            call_id="call_existing_elements",
+            skill_name="get_interactive_elements",
+            status=ToolExecutionStatus.SUCCESS,
+            message="Skill `get_interactive_elements` completed successfully.",
+            data={
+                "elements": [
+                    {
+                        "element_id": "element_sets",
+                        "label": "Наборы",
+                        "tag": "a",
+                        "role": "link",
+                        "selector": 'a[href="/menu/nabory"]',
+                    }
+                ]
+            },
+            duration_ms=8,
+        )
+    )
+    planner = RepeatedElementScanThenFinishPlanner()
+    loop = build_loop(planner=planner, browser=browser, trace_dir=settings.trace_dir)
+
+    report = loop.run(session)
+
+    assert report.status == RuntimeStatus.COMPLETED
+    assert planner.calls == 2
+    assert [action.tool_name for action in session.actions] == [
+        "get_interactive_elements",
+        "finish_task",
+    ]
+    assert any(
+        "rejected by runtime validation" in line
+        and "already includes the result of the most recent `get_interactive_elements` call"
+        in line
         for line in session.execution_history_summary
     )
 

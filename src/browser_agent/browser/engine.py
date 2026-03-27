@@ -754,6 +754,16 @@ class StubBrowserEngine:
 class PlaywrightBrowserEngine:
     """Real browser engine backed by Playwright."""
 
+    _OBSERVATION_RETRY_ATTEMPTS = 3
+    _OBSERVATION_RETRY_WAIT_MS = 150
+    _TRANSIENT_OBSERVATION_ERROR_SNIPPETS = (
+        "Execution context was destroyed",
+        "Frame was detached",
+        "Target page, context or browser has been closed",
+        "Target closed",
+        "Navigation interrupted by another one",
+    )
+
     def __init__(
         self,
         *,
@@ -875,7 +885,22 @@ class PlaywrightBrowserEngine:
 
         locator.scroll_into_view_if_needed(timeout=self.default_timeout_ms)
         self._highlight_locator(locator)
-        locator.click(timeout=self.default_timeout_ms)
+        locator.click(timeout=self.default_timeout_ms, no_wait_after=True)
+
+    def _settle_after_click(self, page: Page) -> None:
+        """Give SPA navigations a brief chance to settle without blocking for a full minute."""
+
+        try:
+            page.wait_for_load_state(
+                "domcontentloaded",
+                timeout=min(self.default_timeout_ms, 1_500),
+            )
+        except Exception:
+            pass
+        try:
+            page.wait_for_timeout(150)
+        except Exception:
+            pass
 
     def _highlight_locator(self, locator: Any) -> None:
         """Flash a target element so headed runs are easier to follow."""
@@ -904,6 +929,30 @@ class PlaywrightBrowserEngine:
             self.get_page().wait_for_timeout(180)
         except Exception:
             return
+
+    def _is_transient_observation_error(self, exc: Exception) -> bool:
+        """Return True when Playwright failed during a short-lived page transition."""
+
+        details = str(exc).lower()
+        return any(
+            snippet.lower() in details
+            for snippet in self._TRANSIENT_OBSERVATION_ERROR_SNIPPETS
+        )
+
+    def _wait_before_observation_retry(self, page: Page) -> None:
+        """Give the active page a brief chance to finish swapping documents/frames."""
+
+        try:
+            page.wait_for_load_state(
+                "domcontentloaded",
+                timeout=min(self.default_timeout_ms, 1_000),
+            )
+        except Exception:
+            pass
+        try:
+            page.wait_for_timeout(self._OBSERVATION_RETRY_WAIT_MS)
+        except Exception:
+            pass
 
     def observe_page(self) -> PageState:
         """Capture a compact page snapshot."""
@@ -1036,6 +1085,7 @@ class PlaywrightBrowserEngine:
             try:
                 locator = page.locator(candidate.value).first
                 self._click_locator_resilient(locator)
+                self._settle_after_click(page)
                 page_state = self._observe_page(reason="click")
                 return BrowserOperationResult(
                     message=f"Clicked target `{target}`.",
@@ -1617,29 +1667,50 @@ class PlaywrightBrowserEngine:
         reason: str,
         max_elements: int | None = None,
     ) -> PageState:
-        page = self.get_page()
+        raw_snapshot: dict[str, Any] | None = None
+        page: Page | None = None
+        retry_count = 0
 
-        try:
-            raw_snapshot = page.evaluate(
-                PAGE_SNAPSHOT_SCRIPT,
-                [self.max_text_chars, max_elements or self.max_interactive_elements],
-            )
-        except Exception as exc:
-            page_url = getattr(page, "url", "about:blank")
+        for attempt in range(self._OBSERVATION_RETRY_ATTEMPTS):
+            page = self.get_page()
             try:
-                page_title = page.title()
-            except Exception:
-                page_title = "Untitled Page"
+                raw_snapshot = page.evaluate(
+                    PAGE_SNAPSHOT_SCRIPT,
+                    [self.max_text_chars, max_elements or self.max_interactive_elements],
+                )
+                break
+            except Exception as exc:
+                page_url = getattr(page, "url", "about:blank")
+                try:
+                    page_title = page.title()
+                except Exception:
+                    page_title = "Untitled Page"
+                is_last_attempt = attempt >= self._OBSERVATION_RETRY_ATTEMPTS - 1
+                if is_last_attempt or not self._is_transient_observation_error(exc):
+                    raise BrowserRuntimeError(
+                        "page_observation_failed",
+                        "Failed to observe the current page.",
+                        metadata={
+                            "details": str(exc),
+                            "captured_reason": reason,
+                            "page_url": page_url,
+                            "page_title": page_title,
+                            "retry_count": retry_count,
+                        },
+                    ) from exc
+                retry_count += 1
+                self._wait_before_observation_retry(page)
+
+        if raw_snapshot is None or page is None:
             raise BrowserRuntimeError(
                 "page_observation_failed",
                 "Failed to observe the current page.",
                 metadata={
-                    "details": str(exc),
                     "captured_reason": reason,
-                    "page_url": page_url,
-                    "page_title": page_title,
+                    "details": "Page observation did not return a snapshot.",
+                    "retry_count": retry_count,
                 },
-            ) from exc
+            )
 
         interactive_elements = [
             self._build_interactive_element(item)
@@ -1674,6 +1745,7 @@ class PlaywrightBrowserEngine:
             metadata={
                 **raw_snapshot.get("metadata", {}),
                 "captured_reason": reason,
+                "observation_retry_count": retry_count,
             },
             captured_at=utc_now(),
         )
