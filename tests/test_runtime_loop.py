@@ -9,6 +9,9 @@ from browser_agent.llm.prompts import build_planner_context
 from browser_agent.llm.planner import PlannerDecision
 from browser_agent.runtime.loop import RuntimeLoop
 from browser_agent.runtime.models import (
+    AgentObservation,
+    InteractiveElement,
+    HumanInterventionKind,
     PlannerDecisionType,
     PlannerProgressState,
     RiskLevel,
@@ -256,6 +259,100 @@ def test_runtime_loop_executes_multiple_steps_and_finishes(tmp_path) -> None:
     assert len(session.trace_items) == 3
     assert session.trace_items[-1].report_summary == report.summary
     assert all(item.planner_decision_type is not None for item in session.trace_items)
+
+
+def test_runtime_loop_maps_captcha_question_to_human_checkpoint(tmp_path) -> None:
+    settings = RuntimeSettings(
+        trace_dir=tmp_path / "traces",
+        artifact_dir=tmp_path / "artifacts",
+    )
+    session = RuntimeSession(
+        task=UserTask(request="Open the site and continue after captcha"),
+        settings=settings,
+    )
+    planner = QueuePlanner(
+        [
+            PlannerDecision(
+                decision_type=PlannerDecisionType.ASK_USER,
+                rationale="The site is blocked by a captcha.",
+                user_question="Пожалуйста, пройдите капчу на странице и продолжите.",
+                completion_confidence=0.1,
+                progress_assessment=PlannerProgressState.NO_PROGRESS,
+            )
+        ]
+    )
+    browser = StubBrowserEngine(
+        PageState(
+            url="https://example.com/challenge",
+            title="Вы не робот?",
+            summary="Captcha page is visible.",
+            text_excerpt="Подтвердите, что вы не робот.",
+        )
+    )
+    loop = build_loop(planner=planner, browser=browser, trace_dir=settings.trace_dir)
+
+    report = loop.run(session)
+
+    assert report.status == RuntimeStatus.WAITING_FOR_INTERVENTION
+    assert report.pending_human_intervention is not None
+    assert report.pending_human_intervention.kind == HumanInterventionKind.CAPTCHA
+    assert session.pending_human_intervention is not None
+
+
+def test_get_interactive_elements_respects_requested_max_elements(tmp_path) -> None:
+    settings = RuntimeSettings(
+        trace_dir=tmp_path / "traces",
+        artifact_dir=tmp_path / "artifacts",
+    )
+    session = RuntimeSession(
+        task=UserTask(request="Collect more interactive elements"),
+        settings=settings,
+    )
+
+    class MaxElementsBrowser(StubBrowserEngine):
+        def get_interactive_elements(self, max_elements: int = 25):
+            return [
+                InteractiveElement(
+                    element_id=f"element_{idx}",
+                    label=f"Link {idx}",
+                    tag="a",
+                    role="link",
+                    selector=f'text="Link {idx}"',
+                    is_clickable=True,
+                )
+                for idx in range(max_elements)
+            ]
+
+        def observe_page(self):
+            return PageState(
+                url="https://example.com/search",
+                title="Search",
+                summary="Results page.",
+                text_excerpt="Results are visible.",
+            )
+
+    planner = QueuePlanner(
+        [
+            act_decision(
+                skill="get_interactive_elements",
+                skill_input={"max_elements": 40},
+                rationale="Collect a larger element set.",
+                expected_outcome="The runtime captures 40 interactive elements.",
+            ),
+            finish_decision("Done."),
+        ]
+    )
+    loop = build_loop(
+        planner=planner,
+        browser=MaxElementsBrowser(),
+        trace_dir=settings.trace_dir,
+    )
+
+    report = loop.run(session)
+
+    assert report.status == RuntimeStatus.COMPLETED
+    assert session.tool_results[0].data["elements"]
+    assert len(session.tool_results[0].data["elements"]) == 40
 
 
 def test_runtime_loop_transitions_to_waiting_for_confirmation_and_can_resume(

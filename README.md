@@ -96,6 +96,21 @@ browser-agent --capture-screenshots --start-url https://example.com --json "Obse
 
 Bare task text is the default launch mode and is treated as `browser-agent run`.
 
+When you use the bare entrypoint, for example:
+
+```bash
+browser-agent "Глянь сеты роллов в Ёбидоёби в Питере до 1500 рублей"
+```
+
+the CLI now applies a product-style bootstrap:
+
+- enables `--ui` automatically;
+- enables a visible browser window (`--headed`) automatically;
+- if no `--start-url` is provided, asks a small bootstrap planner to choose the first page to open.
+
+Only explicit URLs/domains in the task are treated deterministically. Otherwise, the initial
+page choice is planner-driven, typically either a direct site URL or a search URL.
+
 ### Agent Console UI (`--ui`)
 
 For a demo-ready **terminal operator console** (Rich live layout), use `--ui`:

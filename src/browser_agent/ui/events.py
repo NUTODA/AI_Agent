@@ -113,6 +113,19 @@ class UserInputRequested:
 
 
 @dataclass(frozen=True, slots=True)
+class HumanInterventionRequested:
+    """Runtime paused so the operator can act directly in the browser."""
+
+    timestamp: datetime
+    step_number: int
+    kind: str
+    instruction: str
+    prompt: str
+    resume_hint: str | None = None
+    allowed_actions: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class StepCompleted:
     """Trace recorded and step counter advanced for this iteration."""
 
@@ -172,6 +185,7 @@ RuntimeEvent = (
     | SkillExecutionCompleted
     | ConfirmationRequested
     | UserInputRequested
+    | HumanInterventionRequested
     | StepCompleted
     | TokenUsageUpdated
     | AgentRunCompleted
@@ -215,6 +229,7 @@ def list_event_types() -> tuple[str, ...]:
         "SkillExecutionCompleted",
         "ConfirmationRequested",
         "UserInputRequested",
+        "HumanInterventionRequested",
         "StepCompleted",
         "TokenUsageUpdated",
         "AgentRunCompleted",

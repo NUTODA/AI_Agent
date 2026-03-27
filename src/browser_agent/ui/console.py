@@ -22,6 +22,7 @@ from browser_agent.ui.events import (
     AgentRunStarted,
     ConfirmationRequested,
     GuardrailCheck,
+    HumanInterventionRequested,
     ObservationReady,
     PlannerDecisionReady,
     RuntimeEvent,
@@ -143,6 +144,29 @@ def _print_pending_user_question(console: Console, question: str) -> None:
     console.print()
 
 
+def _print_pending_human_intervention(
+    console: Console,
+    kind: str,
+    instruction: str,
+    prompt: str,
+    allowed_actions: list[str],
+    resume_hint: str | None,
+) -> None:
+    """Show the manual browser checkpoint details after Live stops."""
+    console.print()
+    console.print(Rule("[bold yellow]Manual browser step required[/]", style="yellow"))
+    console.print(f"[bold]Checkpoint:[/] {escape(kind)}")
+    console.print(f"[bold]Do this:[/] {escape(instruction)}")
+    console.print(f"[bold]Why paused:[/] {escape(prompt)}")
+    if allowed_actions:
+        console.print("[bold]Allowed actions:[/]")
+        for item in allowed_actions:
+            console.print(f"  • {escape(item)}")
+    if resume_hint:
+        console.print(f"\n[bold]Resume:[/] {escape(resume_hint)}")
+    console.print()
+
+
 class AgentConsoleApp:
     """Operator console: implements RuntimeEventEmitter protocol via emit()."""
 
@@ -167,6 +191,7 @@ class AgentConsoleApp:
         self._pending_target: str | None = None
         self._confirmation_pending = False
         self._user_input_pending = False
+        self._human_checkpoint_pending = False
         self._step_had_non_observe_skill = False
 
     def emit(self, event: RuntimeEvent) -> None:
@@ -313,6 +338,26 @@ class AgentConsoleApp:
             _set_summary(
                 self.state,
                 generate_human_summary(event_kind="user_input", question=event.question),
+            )
+        elif isinstance(event, HumanInterventionRequested):
+            self._human_checkpoint_pending = True
+            self.state.display_phase = "WAITING_INTERVENTION"
+            self.state.bottom_mode = "checkpoint"
+            self.state.status = "waiting"
+            self.state.checkpoint_kind = event.kind
+            self.state.checkpoint_instruction = event.instruction
+            self.state.checkpoint_prompt = event.prompt
+            self.state.checkpoint_resume_hint = event.resume_hint or ""
+            self.state.checkpoint_allowed_actions = list(event.allowed_actions)
+            self.state.error_title = "Manual browser step required"
+            self.state.error_explanation = truncate_text(event.instruction, 220)
+            self.state.error_hint = "Complete the requested step in the browser, then resume the run."
+            _set_summary(
+                self.state,
+                generate_human_summary(
+                    event_kind="human_intervention",
+                    question=event.instruction,
+                ),
             )
         elif isinstance(event, StepCompleted):
             self.state.step_display = (
@@ -602,6 +647,40 @@ class AgentConsoleApp:
 
                         answer = blocking_prompt_with_live(live, self, _answer)
                         report = loop.continue_after_user_answer(self.session, answer)
+                    elif report.status == RuntimeStatus.WAITING_FOR_INTERVENTION:
+                        if report.pending_human_intervention is None:
+                            break
+                        request = report.pending_human_intervention
+                        self.state.bottom_mode = "checkpoint"
+                        self.state.checkpoint_kind = request.kind.value
+                        self.state.checkpoint_instruction = request.instruction
+                        self.state.checkpoint_prompt = request.prompt
+                        self.state.checkpoint_resume_hint = request.resume_hint or ""
+                        self.state.checkpoint_allowed_actions = list(
+                            request.allowed_actions
+                        )
+                        self._refresh()
+
+                        def _resume_note() -> str:
+                            _print_pending_human_intervention(
+                                self.console,
+                                request.kind.value,
+                                request.instruction,
+                                request.prompt,
+                                list(request.allowed_actions),
+                                request.resume_hint,
+                            )
+                            return Prompt.ask(
+                                "[bold]Press Enter when done[/] or leave a short note",
+                                default="",
+                                show_default=False,
+                            )
+
+                        note = blocking_prompt_with_live(live, self, _resume_note)
+                        report = loop.continue_after_human_intervention(
+                            self.session,
+                            note,
+                        )
                     else:
                         break
                     self._refresh()

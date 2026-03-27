@@ -700,12 +700,16 @@ class PlaywrightBrowserEngine:
         max_interactive_elements: int = 25,
         artifact_dir: Path | str | None = None,
         capture_screenshots: bool = False,
+        action_delay_ms: int = 0,
+        highlight_actions: bool = False,
     ) -> None:
         self.headless = headless
         self.default_timeout_ms = default_timeout_ms
         self.max_text_chars = max_text_chars
         self.max_interactive_elements = max_interactive_elements
         self.capture_screenshots = capture_screenshots
+        self.action_delay_ms = max(0, action_delay_ms)
+        self.highlight_actions = highlight_actions
         self.artifact_dir = Path(artifact_dir) if artifact_dir is not None else None
         self._playwright: Playwright | None = None
         self._browser: Browser | None = None
@@ -731,7 +735,10 @@ class PlaywrightBrowserEngine:
 
         try:
             self._playwright = sync_playwright().start()
-            self._browser = self._playwright.chromium.launch(headless=self.headless)
+            launch_kwargs: dict[str, Any] = {"headless": self.headless}
+            if self.action_delay_ms > 0:
+                launch_kwargs["slow_mo"] = self.action_delay_ms
+            self._browser = self._playwright.chromium.launch(**launch_kwargs)
             self._context = self._browser.new_context()
             self._context.set_default_timeout(self.default_timeout_ms)
             self._context.set_default_navigation_timeout(self.default_timeout_ms)
@@ -804,7 +811,36 @@ class PlaywrightBrowserEngine:
         """Scroll the element into view, then click (reduces off-viewport / overlay flakes)."""
 
         locator.scroll_into_view_if_needed(timeout=self.default_timeout_ms)
+        self._highlight_locator(locator)
         locator.click(timeout=self.default_timeout_ms)
+
+    def _highlight_locator(self, locator: Any) -> None:
+        """Flash a target element so headed runs are easier to follow."""
+
+        if self.headless or not self.highlight_actions:
+            return
+        try:
+            locator.evaluate(
+                """el => {
+                    const prevOutline = el.style.outline;
+                    const prevOffset = el.style.outlineOffset;
+                    const prevShadow = el.style.boxShadow;
+                    const prevTransition = el.style.transition;
+                    el.style.transition = "outline 120ms ease, box-shadow 120ms ease";
+                    el.style.outline = "3px solid #ff7a18";
+                    el.style.outlineOffset = "2px";
+                    el.style.boxShadow = "0 0 0 6px rgba(255, 122, 24, 0.22)";
+                    setTimeout(() => {
+                        el.style.outline = prevOutline;
+                        el.style.outlineOffset = prevOffset;
+                        el.style.boxShadow = prevShadow;
+                        el.style.transition = prevTransition;
+                    }, 700);
+                }"""
+            )
+            self.get_page().wait_for_timeout(180)
+        except Exception:
+            return
 
     def observe_page(self) -> PageState:
         """Capture a compact page snapshot."""
@@ -1011,8 +1047,10 @@ class PlaywrightBrowserEngine:
                 if clear_first:
                     locator.fill(text, timeout=self.default_timeout_ms)
                 else:
+                    self._highlight_locator(locator)
                     locator.type(text, timeout=self.default_timeout_ms)
                 if submit:
+                    self._highlight_locator(locator)
                     locator.press("Enter", timeout=self.default_timeout_ms)
                 page_state = self._observe_page(reason="type_text")
                 return BrowserOperationResult(
@@ -1096,6 +1134,7 @@ class PlaywrightBrowserEngine:
         for candidate in resolution.candidates:
             try:
                 locator = page.locator(candidate.value).first
+                self._highlight_locator(locator)
                 select_params: dict[str, str | None] = {}
                 if value is not None:
                     select_params["value"] = value
@@ -1261,6 +1300,7 @@ class PlaywrightBrowserEngine:
                 for candidate in resolution.candidates:
                     try:
                         locator = page.locator(candidate.value).first
+                        self._highlight_locator(locator)
                         locator.press(key, timeout=self.default_timeout_ms)
                         page_state = self._observe_page(reason="press_key")
 

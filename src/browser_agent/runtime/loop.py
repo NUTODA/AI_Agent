@@ -14,6 +14,8 @@ from browser_agent.runtime.models import (
     AgentAction,
     AgentObservation,
     FinalReport,
+    HumanInterventionKind,
+    HumanInterventionRequest,
     InteractiveElement,
     PendingUserQuestion,
     PlannerDecisionType,
@@ -38,6 +40,7 @@ from browser_agent.ui.events import (
     AgentRunStarted,
     ConfirmationRequested,
     GuardrailCheck,
+    HumanInterventionRequested,
     NoOpEventEmitter,
     ObservationReady,
     PlannerDecisionReady,
@@ -96,6 +99,7 @@ class RuntimeLoop:
         if result.status not in {
             RuntimeStatus.WAITING_FOR_CONFIRMATION,
             RuntimeStatus.WAITING_FOR_USER,
+            RuntimeStatus.WAITING_FOR_INTERVENTION,
         }:
             self._events.emit(
                 AgentRunCompleted(
@@ -188,6 +192,11 @@ class RuntimeLoop:
             return session.final_report
         if session.pending_user_question is not None and session.final_report is not None:
             return session.final_report
+        if (
+            session.pending_human_intervention is not None
+            and session.final_report is not None
+        ):
+            return session.final_report
         return self._run_loop(session)
 
     def continue_after_confirmation(
@@ -237,6 +246,16 @@ class RuntimeLoop:
         """Resume execution after the operator answered a blocking question."""
 
         session.continue_after_user_answer(answer)
+        return self._run_loop(session)
+
+    def continue_after_human_intervention(
+        self,
+        session: RuntimeSession,
+        note: str = "",
+    ) -> FinalReport:
+        """Resume execution after the operator completed a manual browser step."""
+
+        session.continue_after_human_intervention(note)
         return self._run_loop(session)
 
     def _run_loop(
@@ -451,6 +470,7 @@ class RuntimeLoop:
             if session.status not in {
                 RuntimeStatus.WAITING_FOR_CONFIRMATION,
                 RuntimeStatus.WAITING_FOR_USER,
+                RuntimeStatus.WAITING_FOR_INTERVENTION,
             }:
                 try:
                     self.browser.stop()
@@ -466,6 +486,20 @@ class RuntimeLoop:
         thought,
         decision: PlannerDecision,
     ) -> FinalReport:
+        intervention = self._detect_human_intervention(
+            question=decision.user_question or "",
+            observation=observation,
+        )
+        if intervention is not None:
+            return self._handle_human_intervention(
+                session=session,
+                step_index=step_index,
+                observation=observation,
+                thought=thought,
+                decision=decision,
+                request=intervention,
+            )
+
         question = PendingUserQuestion(question=decision.user_question or "")
         session.set_pending_user_question(question)
         progress_outcome = ProgressOutcome(
@@ -508,6 +542,141 @@ class RuntimeLoop:
                 timestamp=utc_now(),
                 step_number=step_index,
                 question=question.question,
+            )
+        )
+        session.increment_step()
+        self._emit_step_completed(step_index, progress_outcome.summary, report)
+        return self._finish(session, report)
+
+    def _detect_human_intervention(
+        self,
+        *,
+        question: str,
+        observation: AgentObservation,
+    ) -> HumanInterventionRequest | None:
+        """Translate planner ask_user prompts into typed browser handoffs when applicable."""
+
+        haystack = " ".join(
+            [
+                question,
+                observation.page_title or "",
+                observation.page_url or "",
+                observation.summary or "",
+                observation.visible_text_excerpt or "",
+            ]
+        ).lower()
+
+        if any(token in haystack for token in ("captcha", "капча", "не робот", "anti-bot")):
+            return HumanInterventionRequest(
+                kind=HumanInterventionKind.CAPTCHA,
+                instruction=(
+                    "Пройдите капчу или anti-bot проверку в открытом окне браузера."
+                ),
+                prompt=question or "Сайт показал anti-bot challenge, и агент поставил задачу на паузу.",
+                resume_hint="Когда откроется целевая страница сайта, вернитесь и продолжите запуск.",
+                allowed_actions=[
+                    "Решить капчу",
+                    "Подождать редирект на сайт",
+                ],
+            )
+
+        if any(token in haystack for token in ("2fa", "two-factor", "two factor", "sms", "код подтверждения", "verification code")):
+            return HumanInterventionRequest(
+                kind=HumanInterventionKind.TWO_FACTOR,
+                instruction="Подтвердите вход вручную: введите код или завершите 2FA.",
+                prompt=question or "Сайт запросил дополнительное подтверждение личности.",
+                resume_hint="После успешного входа вернитесь и продолжите запуск.",
+                allowed_actions=[
+                    "Ввести код подтверждения",
+                    "Подтвердить вход вручную",
+                ],
+            )
+
+        if any(token in haystack for token in ("login", "log in", "sign in", "войд", "авториз", "личный кабинет")):
+            return HumanInterventionRequest(
+                kind=HumanInterventionKind.LOGIN,
+                instruction="Войдите в аккаунт в открытом окне браузера.",
+                prompt=question or "Для продолжения сайту нужна авторизация пользователя.",
+                resume_hint="Когда окажетесь в личном кабинете или на нужной странице, продолжите запуск.",
+                allowed_actions=[
+                    "Войти в аккаунт",
+                    "Разрешить сайту завершить редиректы после логина",
+                ],
+            )
+
+        if any(token in haystack for token in ("review", "проверьте", "подтвердите отклик", "confirm application", "сопроводительное письмо")):
+            return HumanInterventionRequest(
+                kind=HumanInterventionKind.REVIEW,
+                instruction="Проверьте подготовленные данные в браузере и убедитесь, что всё выглядит верно.",
+                prompt=question or "Нужен ручной review перед чувствительным действием.",
+                resume_hint="Если всё в порядке, продолжите запуск.",
+                allowed_actions=[
+                    "Проверить данные на странице",
+                    "Убедиться, что можно продолжать",
+                ],
+            )
+
+        return None
+
+    def _handle_human_intervention(
+        self,
+        *,
+        session: RuntimeSession,
+        step_index: int,
+        observation: AgentObservation,
+        thought,
+        decision: PlannerDecision,
+        request: HumanInterventionRequest,
+    ) -> FinalReport:
+        session.set_pending_human_intervention(request)
+        progress_outcome = ProgressOutcome(
+            made_progress=False,
+            summary="Runtime paused for a manual browser checkpoint.",
+            signals=[f"human checkpoint: {request.kind.value}"],
+            no_progress_streak=session.no_progress_streak,
+        )
+        report = FinalReport(
+            session_id=session.session_id,
+            status=RuntimeStatus.WAITING_FOR_INTERVENTION,
+            summary="The runtime is waiting for the operator to complete a manual browser step.",
+            completed=False,
+            actions_taken=self._actions_taken(session),
+            open_questions=[request.instruction],
+            next_steps=[
+                request.instruction,
+                request.resume_hint or "Resume the run after the manual browser step is complete.",
+            ],
+            trace_refs=self._trace_refs(session),
+            artifact_refs=self._artifact_refs(session),
+            final_url=self._final_url(session),
+            step_count=session.step_count + 1,
+            pending_human_intervention=request,
+        )
+        trace_item = self.trace_recorder.record(
+            step_index=step_index,
+            observation=observation,
+            thought=thought,
+            planner_decision=decision,
+            progress_outcome=progress_outcome,
+            state_transition="running -> waiting_for_intervention",
+            report=report,
+            notes=[request.prompt],
+        )
+        session.add_trace_item(trace_item)
+        report.trace_refs = self._trace_refs(session)
+        report.artifact_refs = self._artifact_refs(session)
+        session.record_history(
+            f"step {step_index}: paused for human checkpoint `{request.kind.value}`."
+        )
+        self._events.emit(
+            HumanInterventionRequested(
+                timestamp=utc_now(),
+                step_number=step_index,
+                kind=request.kind.value,
+                instruction=request.instruction,
+                prompt=request.prompt,
+                resume_hint=request.resume_hint,
+                allowed_actions=tuple(request.allowed_actions[:12]),
             )
         )
         session.increment_step()

@@ -6,6 +6,7 @@ import argparse
 import sys
 
 from browser_agent import __version__
+from browser_agent.cli.bootstrap import apply_smart_bootstrap
 from browser_agent.cli.runner import parse_run_args, run_cli_from_args
 from browser_agent.cli.demo_cmd import run_demo
 from browser_agent.cli.doctor_cmd import run_doctor
@@ -60,7 +61,7 @@ def app() -> int:
     subcommands = {"setup", "doctor", "demo", "status", "reset", "run"}
 
     if argv[0] not in subcommands:
-        return _dispatch_run(argv)
+        return _dispatch_run(argv, bare_mode=True)
 
     cmd = argv[0]
     rest = argv[1:]
@@ -101,13 +102,13 @@ def app() -> int:
         )
 
     if cmd == "run":
-        return _dispatch_run(rest)
+        return _dispatch_run(rest, bare_mode=False)
 
     log_error(f"Unknown command {cmd!r}")
     return 2
 
 
-def _dispatch_run(rest: list[str]) -> int:
+def _dispatch_run(rest: list[str], *, bare_mode: bool) -> int:
     try:
         args = parse_run_args(rest)
     except SystemExit as e:
@@ -117,5 +118,6 @@ def _dispatch_run(rest: list[str]) -> int:
         if isinstance(code, int):
             return code
         return 2
+    args = apply_smart_bootstrap(args, bare_mode=bare_mode)
     run_cli_from_args(args)
     return 0

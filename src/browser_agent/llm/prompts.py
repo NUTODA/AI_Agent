@@ -28,6 +28,8 @@ PLANNER_SYSTEM_PROMPT = dedent(
     - Never claim success without evidence from the observation or trace.
     - Choose only one next atomic step per iteration.
     - Ask the user only when required information is genuinely missing.
+    - If the site requires the operator to log in, solve a captcha, pass 2FA, or manually review
+      a sensitive page state, use ask_user with a concrete instruction for that manual browser step.
     - Request confirmation before risky or destructive actions.
     - Finish only when the task is sufficiently supported by observed evidence.
     - progress_assessment must be exactly one of: unknown, no_progress, partial_progress,
@@ -161,6 +163,18 @@ def _render_pending_state(planner_context: PlannerContext) -> str:
     else:
         lines.append("- pending_user_question: none")
 
+    if session_state.pending_human_intervention is not None:
+        lines.append(
+            "- pending_human_intervention: "
+            f"{session_state.pending_human_intervention.kind.value}"
+        )
+        lines.append(
+            "- human_intervention_instruction: "
+            f"{session_state.pending_human_intervention.instruction}"
+        )
+    else:
+        lines.append("- pending_human_intervention: none")
+
     if session_state.user_responses:
         lines.append("- recent_user_answers:")
         for response in session_state.user_responses[-3:]:
@@ -220,7 +234,7 @@ def _render_observation(planner_context: PlannerContext) -> str:
     # Render interactive elements with element_id prominently displayed
     if observation.interactive_elements:
         lines.append("- interactive_elements (USE element_id from this list):")
-        for element in observation.interactive_elements[:15]:
+        for element in _prioritize_interactive_elements(observation.interactive_elements)[:25]:
             element_line = _format_interactive_element(element)
             lines.append(f"  {element_line}")
     else:
@@ -240,6 +254,31 @@ def _render_observation(planner_context: PlannerContext) -> str:
             f"- observation_errors: {', '.join(observation.observation_errors[:4])}"
         )
     return "\n".join(lines)
+
+
+def _prioritize_interactive_elements(elements):
+    """Promote likely result links and high-signal controls into the prompt."""
+
+    def score(element) -> tuple[int, int]:
+        attrs = element.attributes or {}
+        selector = (element.selector or "").lower()
+        text = (element.text or element.label or "").lower()
+        attr_blob = " ".join(f"{k}={v}" for k, v in attrs.items()).lower()
+
+        rank = 0
+        if element.role == "link" or element.tag == "a":
+            rank += 60
+        if element.is_clickable:
+            rank += 20
+        if any(token in selector for token in ("result", "search", "title", "url-link")):
+            rank += 40
+        if any(token in attr_blob for token in ("result", "search", "title", "url-link")):
+            rank += 40
+        if any(token in text for token in ("http", "www.", ".ru", ".com")):
+            rank += 25
+        return (-rank, len(text))
+
+    return sorted(elements, key=score)
 
 
 def _format_interactive_element(element) -> str:

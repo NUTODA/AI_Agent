@@ -42,6 +42,7 @@ def _phase_markup(phase: str) -> str:
         "ACT": PALETTE["accent"],
         "WAITING_CONFIRMATION": PALETTE["warning"],
         "WAITING_USER": PALETTE["info"],
+        "WAITING_INTERVENTION": PALETTE["warning"],
         "FINISHED": f"bold {PALETTE['accent']}",
         "FAILED": f"bold {PALETTE['danger']}",
     }
@@ -295,6 +296,35 @@ def _bottom_panel(state: AgentConsoleState) -> Panel:
             border_style=PALETTE["info"],
             box=box.ROUNDED,
         )
+    if state.bottom_mode == "checkpoint":
+        actions = escape(
+            "\n".join(
+                f"  • {truncate_text(item, 76)}"
+                for item in state.checkpoint_allowed_actions
+            )
+            or "  • Complete the step in the browser, then resume the run."
+        )
+        resume_hint = escape(
+            truncate_text(
+                state.checkpoint_resume_hint
+                or "After you finish in the browser, return here and continue the run.",
+                220,
+            )
+        )
+        body = (
+            f"[bold yellow]NEEDS YOUR ACTION[/]\n\n"
+            f"[bold]Checkpoint:[/] {escape(state.checkpoint_kind or 'manual_step')}\n"
+            f"[bold]What to do:[/]\n{escape(truncate_text(state.checkpoint_instruction, 220))}\n\n"
+            f"[bold]Why the agent paused:[/]\n{escape(truncate_text(state.checkpoint_prompt, 260))}\n\n"
+            f"[bold]Allowed actions:[/]\n{actions}\n\n"
+            f"[dim]{resume_hint}[/]"
+        )
+        return Panel(
+            Text.from_markup(body),
+            title="Human checkpoint",
+            border_style=PALETTE["warning"],
+            box=box.ROUNDED,
+        )
     if state.ui_mode == "demo":
         body = (
             "[bold white]Running autonomously.[/]\n"
@@ -345,7 +375,7 @@ def build_layout(state: AgentConsoleState, width: int | None = None) -> Layout:
 
 
 def build_layout_demo(state: AgentConsoleState) -> Layout:
-    bottom_size = 8 if state.bottom_mode in {"confirm", "input"} else 5
+    bottom_size = 11 if state.bottom_mode == "checkpoint" else 8 if state.bottom_mode in {"confirm", "input"} else 5
     layout = Layout()
     layout.split_column(
         Layout(name="top", size=5),

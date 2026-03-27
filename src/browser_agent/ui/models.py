@@ -15,6 +15,7 @@ DisplayPhase = Literal[
     "ACT",
     "WAITING_CONFIRMATION",
     "WAITING_USER",
+    "WAITING_INTERVENTION",
     "FINISHED",
     "FAILED",
 ]
@@ -62,12 +63,17 @@ class AgentConsoleState:
     human_summary: str = ""
     timeline: list[TimelineStepView] = field(default_factory=list)
     max_timeline_steps: int = 10
-    bottom_mode: Literal["idle", "confirm", "input"] = "idle"
+    bottom_mode: Literal["idle", "confirm", "input", "checkpoint"] = "idle"
     confirm_action: str = ""
     confirm_reason: str = ""
     confirm_prompt: str = ""
     confirm_consequences: list[str] = field(default_factory=list)
     input_question: str = ""
+    checkpoint_kind: str = ""
+    checkpoint_instruction: str = ""
+    checkpoint_prompt: str = ""
+    checkpoint_resume_hint: str = ""
+    checkpoint_allowed_actions: list[str] = field(default_factory=list)
     # Highlighted error strip (tool fail, ambiguous target, planner fail, guardrail)
     error_title: str | None = None
     error_explanation: str | None = None

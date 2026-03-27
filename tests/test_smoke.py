@@ -98,3 +98,56 @@ def test_cli_runs_multistep_runtime_with_configured_planner(
     assert payload["status"] == RuntimeStatus.COMPLETED.value
     assert payload["actions_taken"] == ["extract_page_text", "finish_task"]
     assert payload["step_count"] == 2
+
+
+def test_cli_headed_mode_enables_visual_action_defaults(
+    capsys,
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("BROWSER_AGENT_TRACE_DIR", str(tmp_path / "traces"))
+    monkeypatch.setenv("BROWSER_AGENT_ARTIFACT_DIR", str(tmp_path / "artifacts"))
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        "browser_agent.cli.runner.build_planner",
+        lambda settings, skill_registry, session=None: (
+            QueuePlanner(
+                [
+                    PlannerDecision(
+                        decision_type=PlannerDecisionType.FINISH,
+                        rationale="Nothing else is needed.",
+                        finish_reason="Headed run smoke test.",
+                        completion_confidence=0.9,
+                        progress_assessment=PlannerProgressState.SUBSTANTIAL_PROGRESS,
+                    )
+                ]
+            ),
+            None,
+        ),
+    )
+
+    def fake_build_browser_engine(settings):
+        captured["action_delay_ms"] = settings.action_delay_ms
+        captured["highlight_actions"] = settings.highlight_actions
+        return StubBrowserEngine(
+            PageState(
+                url="https://example.com/fixture",
+                title="Smoke Fixture",
+                summary="Smoke fixture page is ready for observation.",
+                text_excerpt="Smoke fixture text excerpt.",
+            )
+        )
+
+    monkeypatch.setattr("browser_agent.cli.runner.build_browser_engine", fake_build_browser_engine)
+
+    report = run_cli(
+        ["--json", "--headed", "--skip-setup-check", "Inspect the current page"]
+    )
+    captured_out = capsys.readouterr()
+    payload = json.loads(captured_out.out)
+
+    assert report.status == RuntimeStatus.COMPLETED
+    assert payload["status"] == RuntimeStatus.COMPLETED.value
+    assert captured["action_delay_ms"] == 350
+    assert captured["highlight_actions"] is True

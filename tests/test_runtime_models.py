@@ -6,6 +6,8 @@ from browser_agent.runtime.models import (
     AgentAction,
     ConfirmationRequest,
     FinalReport,
+    HumanInterventionKind,
+    HumanInterventionRequest,
     RiskLevel,
     RuntimeStatus,
     ToolExecutionStatus,
@@ -50,6 +52,27 @@ def test_confirmation_request_and_report_contracts() -> None:
     assert confirmation.risk_level == RiskLevel.HIGH
     assert report.status == RuntimeStatus.WAITING_FOR_USER
     assert report.open_questions == ["Approve the submission click?"]
+
+
+def test_human_intervention_request_contract() -> None:
+    request = HumanInterventionRequest(
+        kind=HumanInterventionKind.CAPTCHA,
+        instruction="Complete the captcha in the open browser window.",
+        prompt="The site presented an anti-bot challenge, so the agent paused.",
+        resume_hint="Return after the page finishes loading and continue the run.",
+        allowed_actions=["Solve the captcha", "Wait for redirect to finish"],
+    )
+
+    report = FinalReport(
+        session_id="session_test",
+        status=RuntimeStatus.WAITING_FOR_INTERVENTION,
+        summary="Waiting for the operator to complete a browser checkpoint.",
+        pending_human_intervention=request,
+    )
+
+    assert report.pending_human_intervention is not None
+    assert report.pending_human_intervention.kind == HumanInterventionKind.CAPTCHA
+    assert report.status == RuntimeStatus.WAITING_FOR_INTERVENTION
 
 
 def test_tool_result_contract_supports_structured_payloads() -> None:

@@ -19,6 +19,7 @@ from browser_agent.runtime.models import (
     ConfirmationRequest,
     ExecutionTraceItem,
     FinalReport,
+    HumanInterventionRequest,
     LLMUsageTotals,
     PendingUserQuestion,
     ProgressOutcome,
@@ -64,6 +65,7 @@ class RuntimeSession:
     pending_action: AgentAction | None = None
     pending_planner_decision: PlannerDecision | None = None
     pending_user_question: PendingUserQuestion | None = None
+    pending_human_intervention: HumanInterventionRequest | None = None
     user_responses: list[UserResponse] = field(default_factory=list)
     execution_history_summary: list[str] = field(default_factory=list)
     completion_reason: str | None = None
@@ -138,6 +140,7 @@ class RuntimeSession:
         self.pending_planner_decision = decision if request is not None else None
         if request is not None:
             self.pending_user_question = None
+            self.pending_human_intervention = None
             self.status = RuntimeStatus.WAITING_FOR_CONFIRMATION
         elif self.status == RuntimeStatus.WAITING_FOR_CONFIRMATION:
             self.status = RuntimeStatus.RUNNING
@@ -153,8 +156,25 @@ class RuntimeSession:
             self.pending_confirmation = None
             self.pending_action = None
             self.pending_planner_decision = None
+            self.pending_human_intervention = None
             self.status = RuntimeStatus.WAITING_FOR_USER
         elif self.status == RuntimeStatus.WAITING_FOR_USER:
+            self.status = RuntimeStatus.RUNNING
+
+    def set_pending_human_intervention(
+        self,
+        request: HumanInterventionRequest | None,
+    ) -> None:
+        """Set or clear the current browser handoff request."""
+
+        self.pending_human_intervention = request
+        if request is not None:
+            self.pending_confirmation = None
+            self.pending_action = None
+            self.pending_planner_decision = None
+            self.pending_user_question = None
+            self.status = RuntimeStatus.WAITING_FOR_INTERVENTION
+        elif self.status == RuntimeStatus.WAITING_FOR_INTERVENTION:
             self.status = RuntimeStatus.RUNNING
 
     def continue_after_confirmation(
@@ -209,6 +229,20 @@ class RuntimeSession:
         self.status = RuntimeStatus.RUNNING
         return response
 
+    def continue_after_human_intervention(self, note: str = "") -> None:
+        """Resume execution after the operator completed a browser checkpoint."""
+
+        if self.pending_human_intervention is None:
+            raise ValueError("There is no pending human intervention to resolve.")
+
+        summary = self.pending_human_intervention.instruction
+        if note.strip():
+            summary = f"{summary} Operator note: {note.strip()}"
+        self.record_history(f"Human checkpoint resolved: {summary}")
+        self.pending_human_intervention = None
+        self.final_report = None
+        self.status = RuntimeStatus.RUNNING
+
     def trace_summary(self, *, limit: int = 8) -> list[str]:
         """Return a bounded execution-history summary for the planner."""
 
@@ -224,11 +258,13 @@ class RuntimeSession:
         if report.status not in {
             RuntimeStatus.WAITING_FOR_CONFIRMATION,
             RuntimeStatus.WAITING_FOR_USER,
+            RuntimeStatus.WAITING_FOR_INTERVENTION,
         }:
             self.pending_confirmation = None
             self.pending_action = None
             self.pending_planner_decision = None
             self.pending_user_question = None
+            self.pending_human_intervention = None
         return report
 
     @property
@@ -310,6 +346,7 @@ class RuntimeSession:
             latest_extracted_text_url=latest_extracted_text_url,
             pending_confirmation=self.pending_confirmation,
             pending_user_question=self.pending_user_question,
+            pending_human_intervention=self.pending_human_intervention,
             user_responses=self.user_responses[-3:],
         )
 

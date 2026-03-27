@@ -12,6 +12,7 @@ from browser_agent.runtime.models import (
     AgentObservation,
     AgentThought,
     ConfirmationRequest,
+    HumanInterventionRequest,
     PendingUserQuestion,
     PlannerDecisionType,
     PlannerProgressState,
@@ -50,6 +51,7 @@ class PlannerSessionState(BaseModel):
     latest_extracted_text_url: str | None = None
     pending_confirmation: ConfirmationRequest | None = None
     pending_user_question: PendingUserQuestion | None = None
+    pending_human_intervention: HumanInterventionRequest | None = None
     user_responses: list[UserResponse] = Field(default_factory=list)
 
 

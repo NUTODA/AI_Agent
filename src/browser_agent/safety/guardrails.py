@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Iterable
 
 from pydantic import BaseModel, Field
@@ -54,14 +55,7 @@ class SafetyGuardrails:
         requires_confirmation = action.requires_confirmation
         risk_level = action.risk_level
 
-        action_text = " ".join(
-            [
-                action.tool_name,
-                action.expected_outcome,
-                action.rationale,
-                " ".join(f"{key}={value}" for key, value in action.parameters.items()),
-            ]
-        ).lower()
+        action_text = self._action_text_for_keyword_scan(action)
 
         if action.destructive:
             matched_signals.append("action marked as destructive")
@@ -69,7 +63,7 @@ class SafetyGuardrails:
             if risk_level in {RiskLevel.LOW, RiskLevel.MEDIUM}:
                 risk_level = RiskLevel.HIGH
 
-        if any(keyword in action_text for keyword in self._destructive_keywords):
+        if self._contains_destructive_keyword(action_text):
             matched_signals.append("destructive keyword matched")
             requires_confirmation = True
             if risk_level in {RiskLevel.LOW, RiskLevel.MEDIUM}:
@@ -90,6 +84,30 @@ class SafetyGuardrails:
             reason=reason,
             matched_signals=matched_signals,
         )
+
+    def _action_text_for_keyword_scan(self, action: AgentAction) -> str:
+        """Return the subset of action text that should influence destructive matching."""
+
+        parts = [action.tool_name, action.expected_outcome]
+
+        # Free-form typing often contains words like "submit" or "apply" that are
+        # harmless inside a search box. Do not gate those solely by keyword.
+        if action.tool_name != "type_text":
+            parts.append(action.rationale)
+            parts.extend(
+                f"{key}={value}"
+                for key, value in action.parameters.items()
+                if key != "text"
+            )
+
+        return " ".join(parts).lower()
+
+    def _contains_destructive_keyword(self, text: str) -> bool:
+        for keyword in self._destructive_keywords:
+            pattern = rf"\b{re.escape(keyword)}\b"
+            if re.search(pattern, text):
+                return True
+        return False
 
     def requires_confirmation(self, action: AgentAction) -> bool:
         """Convenience helper used by the runtime loop."""

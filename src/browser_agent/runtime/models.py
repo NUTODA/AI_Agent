@@ -38,6 +38,7 @@ class RuntimeStatus(str, Enum):
     RUNNING = "running"
     WAITING_FOR_USER = "waiting_for_user"
     WAITING_FOR_CONFIRMATION = "waiting_for_confirmation"
+    WAITING_FOR_INTERVENTION = "waiting_for_intervention"
     COMPLETED = "completed"
     STOPPED = "stopped"
     FAILED = "failed"
@@ -208,6 +209,29 @@ class PendingUserQuestion(BaseModel):
     created_at: datetime = Field(default_factory=utc_now)
 
 
+class HumanInterventionKind(str, Enum):
+    """Reasons the runtime hands browser control back to the operator."""
+
+    LOGIN = "login"
+    CAPTCHA = "captcha"
+    TWO_FACTOR = "two_factor"
+    SITE_HANDOFF = "site_handoff"
+    REVIEW = "review"
+    CUSTOM = "custom"
+
+
+class HumanInterventionRequest(BaseModel):
+    """A typed browser handoff that requires manual operator action."""
+
+    request_id: str = Field(default_factory=lambda: new_id("handoff"))
+    kind: HumanInterventionKind = HumanInterventionKind.CUSTOM
+    instruction: str
+    prompt: str
+    resume_hint: str | None = None
+    allowed_actions: list[str] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=utc_now)
+
+
 class UserResponse(BaseModel):
     """A user answer captured for a pending runtime question."""
 
@@ -311,4 +335,5 @@ class FinalReport(BaseModel):
     failure_reason: str | None = None
     pending_confirmation: ConfirmationRequest | None = None
     pending_user_question: PendingUserQuestion | None = None
+    pending_human_intervention: HumanInterventionRequest | None = None
     generated_at: datetime = Field(default_factory=utc_now)

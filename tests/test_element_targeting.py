@@ -495,6 +495,51 @@ class TestObservationRendering:
         assert "field_xyz789" in rendered
         assert "[field_xyz789]" in rendered
 
+    def test_render_observation_prioritizes_result_links(self) -> None:
+        """Search-result links should appear before generic controls in planner context."""
+        from browser_agent.llm.prompts import _render_observation
+        from browser_agent.llm.planner import PlannerContext, PlannerSessionState
+        from browser_agent.runtime.models import UserTask, RuntimeStatus
+
+        observation = AgentObservation(
+            summary="Search results page",
+            interactive_elements=[
+                InteractiveElement(
+                    element_id="element_settings",
+                    label="Settings",
+                    tag="button",
+                    role="button",
+                    selector='role=button[name="Settings"]',
+                    is_clickable=True,
+                ),
+                InteractiveElement(
+                    element_id="element_result",
+                    label="Ёбидоёби - Доставка суши",
+                    tag="a",
+                    role="link",
+                    text="Ёбидоёби - Доставка суши",
+                    selector='[data-testid="result-title-a"]',
+                    is_clickable=True,
+                    attributes={"data-testid": "result-title-a"},
+                ),
+            ],
+        )
+
+        context = PlannerContext(
+            task=UserTask(request="Find a result"),
+            current_observation=observation,
+            session_state=PlannerSessionState(
+                session_id="test",
+                status=RuntimeStatus.RUNNING,
+                step_count=0,
+                max_steps=10,
+            ),
+        )
+
+        rendered = _render_observation(context)
+
+        assert rendered.find("element_result") < rendered.find("element_settings")
+
 
 class TestSkillFieldDescriptions:
     """Tests for updated skill input field descriptions."""

@@ -178,6 +178,11 @@ def generate_human_summary(
             f"Waiting for confirmation before: {act}.", 160
         )
 
+    if event_kind == "human_intervention":
+        return truncate_text(
+            question or "Waiting for you to complete a manual browser step.", 160
+        )
+
     if event_kind == "user_input":
         return truncate_text(question or "Waiting for your answer.", 160)
 
@@ -198,6 +203,8 @@ def compute_timeline_phase_label(
     """Map terminal session status + step activity to a canonical phase label for step cards."""
     if session_status == "waiting_for_confirmation":
         return "WAITING_CONFIRMATION"
+    if session_status == "waiting_for_intervention":
+        return "WAITING_INTERVENTION"
     if session_status == "waiting_for_user":
         return "WAITING_USER"
     if session_status == "failed" and not step_had_non_observe_skill:

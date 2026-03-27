@@ -26,6 +26,8 @@ class RuntimeSettings(BaseModel):
     trace_dir: Path = Field(default_factory=lambda: Path("traces"))
     artifact_dir: Path = Field(default_factory=lambda: Path("artifacts"))
     capture_screenshots: bool = False
+    action_delay_ms: int = 0
+    highlight_actions: bool = False
     bootstrap_mode: bool = True
     allow_external_navigation: bool = True
     planner_enabled: bool = False
@@ -54,6 +56,12 @@ class RuntimeSettings(BaseModel):
             artifact_dir=Path(os.getenv("BROWSER_AGENT_ARTIFACT_DIR", "artifacts")),
             capture_screenshots=os.getenv(
                 "BROWSER_AGENT_CAPTURE_SCREENSHOTS",
+                "false",
+            ).lower()
+            == "true",
+            action_delay_ms=int(os.getenv("BROWSER_AGENT_ACTION_DELAY_MS", "0")),
+            highlight_actions=os.getenv(
+                "BROWSER_AGENT_HIGHLIGHT_ACTIONS",
                 "false",
             ).lower()
             == "true",

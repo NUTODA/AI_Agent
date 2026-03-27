@@ -14,12 +14,15 @@ import pytest
 from browser_agent.cli.runner import (
     is_terminal_status,
     prompt_for_confirmation,
+    prompt_for_human_intervention,
     prompt_for_user_answer,
     run_cli_interactive,
 )
 from browser_agent.runtime.models import (
     ConfirmationRequest,
     FinalReport,
+    HumanInterventionKind,
+    HumanInterventionRequest,
     PendingUserQuestion,
     RiskLevel,
     RuntimeStatus,
@@ -51,6 +54,10 @@ class TestIsTerminalStatus:
     def test_waiting_for_user_is_not_terminal(self) -> None:
         """WAITING_FOR_USER should not be terminal."""
         assert is_terminal_status(RuntimeStatus.WAITING_FOR_USER) is False
+
+    def test_waiting_for_intervention_is_not_terminal(self) -> None:
+        """WAITING_FOR_INTERVENTION should not be terminal."""
+        assert is_terminal_status(RuntimeStatus.WAITING_FOR_INTERVENTION) is False
 
     def test_running_is_not_terminal(self) -> None:
         """RUNNING should not be terminal."""
@@ -217,6 +224,36 @@ class TestPromptForUserAnswer:
         answer = prompt_for_user_answer(report)
 
         assert answer == "user@example.com"
+
+
+class TestPromptForHumanIntervention:
+    """Test the human-checkpoint prompt function."""
+
+    def test_returns_none_when_no_pending_intervention(self) -> None:
+        report = FinalReport(
+            session_id=_SID,
+            status=RuntimeStatus.COMPLETED,
+            summary="Test",
+        )
+        assert prompt_for_human_intervention(report) is None
+
+    def test_returns_optional_note(self, monkeypatch) -> None:
+        report = FinalReport(
+            session_id=_SID,
+            status=RuntimeStatus.WAITING_FOR_INTERVENTION,
+            summary="Test",
+            pending_human_intervention=HumanInterventionRequest(
+                kind=HumanInterventionKind.CAPTCHA,
+                instruction="Solve the captcha in the browser.",
+                prompt="The site paused on an anti-bot page.",
+            ),
+        )
+
+        monkeypatch.setattr("builtins.input", lambda _: "done")
+
+        note = prompt_for_human_intervention(report)
+
+        assert note == "done"
 
     def test_handles_empty_answer(self, monkeypatch) -> None:
         """Should handle empty user input."""

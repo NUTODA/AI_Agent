@@ -78,6 +78,9 @@ class GetInteractiveElementsSkill(BaseSkill):
         payload: GetInteractiveElementsInput,
     ) -> GetInteractiveElementsOutput:
         try:
+            elements = context.browser.get_interactive_elements(
+                max_elements=payload.max_elements
+            )
             page_state = context.browser.observe_page()
         except Exception as exc:
             raise SkillExecutionError(
@@ -86,6 +89,7 @@ class GetInteractiveElementsSkill(BaseSkill):
                 data={"details": str(exc)},
             ) from exc
         observation = page_state.to_agent_observation()
+        observation.interactive_elements = elements[: payload.max_elements]
         return GetInteractiveElementsOutput(
             elements=observation.interactive_elements[: payload.max_elements],
             observation=observation,

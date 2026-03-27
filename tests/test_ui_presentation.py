@@ -23,6 +23,16 @@ def test_compute_timeline_phase_label_waiting_confirmation() -> None:
     )
 
 
+def test_compute_timeline_phase_label_waiting_intervention() -> None:
+    assert (
+        compute_timeline_phase_label(
+            session_status="waiting_for_intervention",
+            step_had_non_observe_skill=True,
+        )
+        == "WAITING_INTERVENTION"
+    )
+
+
 def test_compute_timeline_phase_label_planner_fail_without_action_skill() -> None:
     assert (
         compute_timeline_phase_label(
@@ -112,6 +122,19 @@ def test_build_layout_input_bottom_panel_question_title() -> None:
     assert "Question" in text
     assert "Which size?" in text
     assert "read-only" in text.lower() or "not a text field" in text.lower()
+
+
+def test_build_layout_checkpoint_bottom_panel_title() -> None:
+    state = AgentConsoleState()
+    state.bottom_mode = "checkpoint"
+    state.checkpoint_kind = "captcha"
+    state.checkpoint_instruction = "Solve the captcha in the browser."
+    state.checkpoint_prompt = "The site paused the automated session."
+    state.checkpoint_allowed_actions = ["Solve the captcha", "Wait for redirect"]
+    text = _layout_export_text(state)
+    assert "Human checkpoint" in text
+    assert "NEEDS YOUR ACTION" in text
+    assert "Solve the captcha" in text
 
 
 def test_build_layout_debug_mode_keeps_operator_read_only_copy() -> None:

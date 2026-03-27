@@ -121,6 +121,10 @@ def run_cli_from_args(args: Namespace, *, task_override: str | None = None) -> F
         settings = settings.model_copy(update={"max_steps": args.max_steps})
     if args.headed:
         settings = settings.model_copy(update={"headless": False})
+        if settings.action_delay_ms <= 0:
+            settings = settings.model_copy(
+                update={"action_delay_ms": 350, "highlight_actions": True}
+            )
     if args.capture_screenshots:
         settings = settings.model_copy(update={"capture_screenshots": True})
 
@@ -220,6 +224,8 @@ def build_browser_engine(settings: RuntimeSettings) -> PlaywrightBrowserEngine:
         max_text_chars=settings.max_text_chars,
         artifact_dir=settings.artifact_dir,
         capture_screenshots=settings.capture_screenshots,
+        action_delay_ms=settings.action_delay_ms,
+        highlight_actions=settings.highlight_actions,
     )
 
 
@@ -347,6 +353,22 @@ def render_text_report(report: FinalReport, *, session: RuntimeSession | None = 
         lines.append("PENDING USER QUESTION")
         lines.append("─" * 60)
         lines.append(f"  {report.pending_user_question.question}")
+        lines.append("")
+
+    if report.pending_human_intervention is not None:
+        request = report.pending_human_intervention
+        lines.append("─" * 60)
+        lines.append("PENDING HUMAN CHECKPOINT")
+        lines.append("─" * 60)
+        lines.append(f"  Kind: {request.kind.value}")
+        lines.append(f"  Instruction: {request.instruction}")
+        lines.append(f"  Reason: {request.prompt}")
+        if request.allowed_actions:
+            lines.append("  Allowed actions:")
+            for action in request.allowed_actions:
+                lines.append(f"    - {action}")
+        if request.resume_hint:
+            lines.append(f"  Resume: {request.resume_hint}")
         lines.append("")
 
     # Open questions
@@ -524,6 +546,30 @@ def prompt_for_user_answer(report: FinalReport) -> str | None:
     return answer
 
 
+def prompt_for_human_intervention(report: FinalReport) -> str | None:
+    """Pause until the operator completes a manual browser checkpoint."""
+
+    if report.pending_human_intervention is None:
+        return None
+
+    request = report.pending_human_intervention
+    print("\n" + "=" * 60)
+    print("MANUAL BROWSER STEP REQUIRED")
+    print("=" * 60)
+    print(f"Checkpoint: {request.kind.value}")
+    print(f"Do this: {request.instruction}")
+    print(f"Why paused: {request.prompt}")
+    if request.allowed_actions:
+        print("Allowed actions:")
+        for action in request.allowed_actions:
+            print(f"  - {action}")
+    if request.resume_hint:
+        print(f"\nResume: {request.resume_hint}")
+    print("-" * 60)
+    note = input("Press Enter when done (or leave a short note): ").strip()
+    return note
+
+
 def is_terminal_status(status: RuntimeStatus) -> bool:
     """Check if the runtime has reached a terminal state."""
 
@@ -585,6 +631,23 @@ def run_cli_interactive(
 
             print(f"\n[Answer received] Continuing execution...")
             report = loop.continue_after_user_answer(session, answer)
+
+        elif report.status == RuntimeStatus.WAITING_FOR_INTERVENTION:
+            if args_json:
+                print(
+                    "[browser-agent] --json disables interactive browser-checkpoint prompts. "
+                    "Re-run without --json or use `browser-agent run --ui`.",
+                    file=sys.stderr,
+                )
+                print(json.dumps(report.model_dump(mode="json"), indent=2))
+                return report
+
+            note = prompt_for_human_intervention(report)
+            if note is None:
+                note = ""
+
+            print("\n[Checkpoint completed] Continuing execution...")
+            report = loop.continue_after_human_intervention(session, note)
 
         else:
             # Unknown state, break to avoid infinite loop
