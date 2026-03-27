@@ -44,6 +44,9 @@ class SelectorResolution(BaseModel):
     used_element_reference: bool = False
 
 
+_MAX_SEMANTIC_TEXT_SELECTOR_CHARS = 80
+
+
 def _normalize_text(value: str | None) -> str | None:
     if value is None:
         return None
@@ -67,6 +70,49 @@ def _playwright_text_selector(text: str) -> str:
 
 def _playwright_role_selector(role: str, name: str) -> str:
     return f"role={role}[name={json.dumps(name)}]"
+
+
+def _supports_semantic_text_selector(value: str | None) -> bool:
+    normalized = _normalize_text(value)
+    return bool(normalized and len(normalized) <= _MAX_SEMANTIC_TEXT_SELECTOR_CHARS)
+
+
+def _strategy_for_selector_value(value: str) -> SelectorStrategy:
+    if value.startswith("role="):
+        return SelectorStrategy.ROLE
+    if value.startswith("text="):
+        return SelectorStrategy.TEXT
+    if "[data-testid=" in value:
+        return SelectorStrategy.DATA_TESTID
+    if "[aria-label=" in value:
+        return SelectorStrategy.ARIA_LABEL
+    if "[placeholder=" in value:
+        return SelectorStrategy.PLACEHOLDER
+    if "[name=" in value:
+        return SelectorStrategy.NAME
+    if "[id=" in value:
+        return SelectorStrategy.ID
+    return SelectorStrategy.CSS
+
+
+def _candidates_from_cached_selectors(
+    selector_values: list[str],
+) -> list[SelectorCandidate]:
+    candidates: list[SelectorCandidate] = []
+    confidence = 0.98
+    for value in selector_values:
+        if not value:
+            continue
+        candidates.append(
+            SelectorCandidate(
+                strategy=_strategy_for_selector_value(value),
+                value=value,
+                confidence=max(confidence, 0.35),
+                notes="Selector candidate restored from the observed element cache.",
+            )
+        )
+        confidence -= 0.08
+    return _dedupe_candidates(candidates)
 
 
 def _dedupe_candidates(
@@ -111,7 +157,11 @@ def build_selector_candidates(
     )
     role = element.role.value if hasattr(element.role, "value") else str(element.role)
     playwright_role = {"input": "textbox", "textarea": "textbox"}.get(role, role)
-    if playwright_role and playwright_role != "other" and accessible_name:
+    if (
+        playwright_role
+        and playwright_role != "other"
+        and _supports_semantic_text_selector(accessible_name)
+    ):
         candidates.append(
             SelectorCandidate(
                 strategy=SelectorStrategy.ROLE,
@@ -133,7 +183,7 @@ def build_selector_candidates(
         )
 
     label = _normalize_text(element.name)
-    if label:
+    if _supports_semantic_text_selector(label):
         candidates.append(
             SelectorCandidate(
                 strategy=SelectorStrategy.LABEL,
@@ -144,7 +194,10 @@ def build_selector_candidates(
         )
 
     text_value = _normalize_text(element.text)
-    if text_value and text_value != label:
+    if (
+        _supports_semantic_text_selector(text_value)
+        and text_value != label
+    ):
         candidates.append(
             SelectorCandidate(
                 strategy=SelectorStrategy.TEXT,
@@ -235,9 +288,16 @@ def resolve_target_candidates(
             ],
         )
 
+    cached_selector_values = list(element.selector_candidates or [])
+    candidates = (
+        _candidates_from_cached_selectors(cached_selector_values)
+        if cached_selector_values
+        else build_selector_candidates(element)
+    )
+
     return SelectorResolution(
         target=target,
-        candidates=build_selector_candidates(element),
+        candidates=candidates,
         matched_element_id=element.element_id,
         used_element_reference=True,
     )

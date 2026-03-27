@@ -1469,6 +1469,8 @@ class RuntimeLoop:
         session: RuntimeSession,
     ) -> bool:
         planner_state = session.planner_state()
+        if planner_state.latest_action_name == "scroll_viewport":
+            return False
         extracted_text = (planner_state.latest_extracted_text or "").strip()
         if not extracted_text or planner_state.latest_extracted_text_truncated is True:
             return False
@@ -1506,6 +1508,25 @@ class RuntimeLoop:
             "аккордеон",
         )
         if any(keyword in rationale_text for keyword in reveal_keywords):
+            return False
+
+        reading_keywords = (
+            "read",
+            "reading",
+            "continue reading",
+            "document",
+            "page text",
+            "same page",
+            "summarize",
+            "inspect the text",
+            "прочит",
+            "чтени",
+            "текст",
+            "документ",
+            "страниц",
+            "суммари",
+        )
+        if not any(keyword in rationale_text for keyword in reading_keywords):
             return False
 
         label_lower = label.lower()

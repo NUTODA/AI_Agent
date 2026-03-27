@@ -13,6 +13,7 @@ from browser_agent.llm.planner import (
     PlannerSessionState,
 )
 from browser_agent.runtime.models import (
+    AgentAction,
     AgentObservation,
     InteractiveElement,
     RiskLevel,
@@ -256,6 +257,122 @@ class TestElementTargetingValidation:
 
         assert result.decision_type == PlannerDecisionType.FAIL
         assert "redundant click" in (result.failure_reason or "").lower()
+
+    def test_validate_element_targeting_allows_click_after_scroll_following_read(self) -> None:
+        """A follow-up click after scrolling should not be blocked as a redundant reread."""
+        loop = create_mock_loop()
+        observation = AgentObservation(
+            page_url="https://example.com/spec",
+            page_title="Spec",
+            summary="Spec page",
+            visible_text_excerpt="Spec Title Requirements Architecture",
+            interactive_elements=[
+                InteractiveElement(
+                    element_id="element_title_btn",
+                    label="Spec Title",
+                    tag="button",
+                    role="button",
+                    text="Spec Title",
+                    selector='role=button[name="Spec Title"]',
+                ),
+            ],
+        )
+        session = RuntimeSession(
+            task=UserTask(request="Summarize the spec"),
+            settings=RuntimeSettings(max_steps=8),
+        )
+        session.add_tool_result(
+            ToolResult(
+                call_id="call_extract",
+                skill_name="extract_page_text",
+                status=ToolExecutionStatus.SUCCESS,
+                message="Extracted page text.",
+                data={
+                    "text": (
+                        "Spec Title\nRequirements\nArchitecture\n" * 120
+                    ),
+                    "truncated": False,
+                    "page_url": "https://example.com/spec",
+                },
+            )
+        )
+        session.add_action(
+            AgentAction(
+                tool_name="scroll_viewport",
+                rationale="Scroll to the next section.",
+                parameters={"direction": "down", "amount": 900},
+                expected_outcome="More content becomes visible.",
+            )
+        )
+
+        decision = PlannerDecision(
+            decision_type=PlannerDecisionType.ACT,
+            rationale="Click the page title button after scrolling to inspect the new section.",
+            chosen_skill="click_element",
+            skill_input={"element_id": "element_title_btn"},
+            expected_outcome="A new section becomes available.",
+        )
+
+        result = loop._validate_element_targeting(
+            decision,
+            observation,
+            session=session,
+        )
+
+        assert result.decision_type == PlannerDecisionType.ACT
+
+    def test_validate_element_targeting_allows_drilldown_click_after_extract(self) -> None:
+        """Catalog drill-down clicks should not be blocked just because item text appears in extracted text."""
+        loop = create_mock_loop()
+        observation = AgentObservation(
+            page_url="https://example.com/catalog",
+            page_title="Catalog",
+            summary="Catalog page",
+            visible_text_excerpt="Budget Set 1499",
+            interactive_elements=[
+                InteractiveElement(
+                    element_id="element_set_card",
+                    label="Budget Set",
+                    tag="a",
+                    role="link",
+                    text="Budget Set",
+                    selector='role=link[name="Budget Set"]',
+                ),
+            ],
+        )
+        session = RuntimeSession(
+            task=UserTask(request="Find sets up to 1500"),
+            settings=RuntimeSettings(max_steps=8),
+        )
+        session.add_tool_result(
+            ToolResult(
+                call_id="call_extract",
+                skill_name="extract_page_text",
+                status=ToolExecutionStatus.SUCCESS,
+                message="Extracted page text.",
+                data={
+                    "text": ("Budget Set 1499\nAnother Set 1699\n" * 80),
+                    "truncated": False,
+                    "page_url": "https://example.com/catalog",
+                },
+            )
+        )
+
+        decision = PlannerDecision(
+            decision_type=PlannerDecisionType.ACT,
+            rationale="Open the set details to verify the exact composition and price.",
+            chosen_skill="click_element",
+            skill_input={"element_id": "element_set_card"},
+            expected_outcome="The set detail page opens for verification.",
+        )
+
+        result = loop._validate_element_targeting(
+            decision,
+            observation,
+            session=session,
+        )
+
+        assert result.decision_type == PlannerDecisionType.ACT
 
     def test_validate_element_targeting_rejects_ambiguous_selector(self) -> None:
         """Validation should reject selector matching multiple elements.

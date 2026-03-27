@@ -141,3 +141,53 @@ def test_resolve_target_candidates_maintains_element_id_format() -> None:
     assert resolution.used_element_reference is True
     assert resolution.matched_element_id == "element_stale_but_formatted"
     assert resolution.candidates == []
+
+
+def test_build_selector_candidates_skips_fragile_long_text_selectors() -> None:
+    """Long search-result snippets should fall back to CSS instead of huge role/text selectors."""
+    long_title = (
+        "Ёбидоёби - Доставка суши и роллов в Санкт-Петербурге "
+        "yobidoyobi.ru https://spb.yobidoyobi.ru"
+    )
+    element = InteractiveElementState(
+        element_id="element_search_result",
+        name=long_title,
+        tag="a",
+        role=ElementRole.LINK,
+        selector="div:nth-of-type(1) > div > div > span > a",
+        text=long_title,
+        clickable=True,
+    )
+
+    candidates = build_selector_candidates(element)
+
+    assert [candidate.value for candidate in candidates] == [
+        "div:nth-of-type(1) > div > div > span > a"
+    ]
+    assert candidates[0].strategy == SelectorStrategy.CSS
+
+
+def test_resolve_target_candidates_preserves_cached_css_fallback_order() -> None:
+    """Resolver should reuse cached selector_candidates instead of rebuilding from the primary selector."""
+    element = InteractiveElementState(
+        element_id="element_cached",
+        name="Result",
+        tag="a",
+        role=ElementRole.LINK,
+        selector='role=link[name="Result"]',
+        selector_candidates=[
+            'role=link[name="Result"]',
+            'text="Result"',
+            "div:nth-of-type(1) > div > div > span > a",
+        ],
+        text="Result",
+        clickable=True,
+    )
+
+    resolution = resolve_target_candidates("element_cached", {"element_cached": element})
+
+    assert [candidate.value for candidate in resolution.candidates] == [
+        'role=link[name="Result"]',
+        'text="Result"',
+        "div:nth-of-type(1) > div > div > span > a",
+    ]
