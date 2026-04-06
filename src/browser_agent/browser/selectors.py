@@ -8,7 +8,7 @@ from typing import Mapping
 
 from pydantic import BaseModel, Field
 
-from browser_agent.browser.page_state import InteractiveElementState
+from browser_agent.browser.page_state import FormFieldState, InteractiveElementState
 
 
 class SelectorStrategy(str, Enum):
@@ -52,6 +52,22 @@ def _normalize_text(value: str | None) -> str | None:
         return None
     cleaned = " ".join(value.split()).strip()
     return cleaned or None
+
+
+def _looks_volatile_id(value: str | None) -> bool:
+    normalized = _normalize_text(value)
+    if not normalized:
+        return False
+    return normalized.startswith(
+        (
+            "mat-input-",
+            "mat-mdc-",
+            "cdk-",
+            "headlessui-",
+            "react-select-",
+            "radix-",
+        )
+    )
 
 
 def _quote_css_attribute(value: str) -> str:
@@ -230,7 +246,7 @@ def build_selector_candidates(
         )
 
     id_attr = _normalize_text(str(attributes.get("id") or ""))
-    if id_attr:
+    if id_attr and not _looks_volatile_id(id_attr):
         candidates.append(
             SelectorCandidate(
                 strategy=SelectorStrategy.ID,
@@ -245,6 +261,98 @@ def build_selector_candidates(
             SelectorCandidate(
                 strategy=SelectorStrategy.CSS,
                 value=element.selector,
+                confidence=0.45,
+                notes="Last-resort CSS fallback generated from the DOM path.",
+            )
+        )
+
+    return _dedupe_candidates(candidates)
+
+
+def build_form_field_selector_candidates(
+    field: FormFieldState,
+) -> list[SelectorCandidate]:
+    """Return stable selector candidates for an observed form field."""
+
+    attributes = field.attributes
+    candidates: list[SelectorCandidate] = []
+
+    data_testid = _normalize_text(
+        str(attributes.get("data-testid") or attributes.get("testid") or "")
+    )
+    if data_testid:
+        candidates.append(
+            SelectorCandidate(
+                strategy=SelectorStrategy.DATA_TESTID,
+                value='input[data-testid=%s]' % _quote_css_attribute(data_testid),
+                confidence=0.98,
+                notes="Stable form-field selector from data-testid.",
+            )
+        )
+
+    aria_label = _normalize_text(str(attributes.get("aria-label") or ""))
+    if aria_label:
+        candidates.append(
+            SelectorCandidate(
+                strategy=SelectorStrategy.ARIA_LABEL,
+                value=_attr_selector("aria-label", aria_label, "input"),
+                confidence=0.9,
+                notes="Form field selector derived from aria-label.",
+            )
+        )
+
+    accessible_name = _normalize_text(field.label or field.placeholder or field.name)
+    role = "combobox" if (field.field_type or "").lower() == "select" else "textbox"
+    if _supports_semantic_text_selector(accessible_name):
+        candidates.append(
+            SelectorCandidate(
+                strategy=SelectorStrategy.ROLE,
+                value=_playwright_role_selector(role, accessible_name),
+                confidence=0.88,
+                notes="Semantic role selector for the observed field.",
+            )
+        )
+
+    placeholder = _normalize_text(
+        field.placeholder or str(attributes.get("placeholder") or "")
+    )
+    if placeholder:
+        candidates.append(
+            SelectorCandidate(
+                strategy=SelectorStrategy.PLACEHOLDER,
+                value=_attr_selector("placeholder", placeholder, "input"),
+                confidence=0.8,
+                notes="Form field selector using placeholder text.",
+            )
+        )
+
+    name_attr = _normalize_text(str(attributes.get("name") or field.name or ""))
+    if name_attr:
+        candidates.append(
+            SelectorCandidate(
+                strategy=SelectorStrategy.NAME,
+                value=_attr_selector("name", name_attr, "input"),
+                confidence=0.74,
+                notes="Form field selector using the name attribute.",
+            )
+        )
+
+    id_attr = _normalize_text(str(attributes.get("id") or ""))
+    if id_attr and not _looks_volatile_id(id_attr):
+        candidates.append(
+            SelectorCandidate(
+                strategy=SelectorStrategy.ID,
+                value=_attr_selector("id", id_attr, "input"),
+                confidence=0.62,
+                notes="Fallback form field selector using a stable id attribute.",
+            )
+        )
+
+    if field.selector:
+        candidates.append(
+            SelectorCandidate(
+                strategy=SelectorStrategy.CSS,
+                value=field.selector,
                 confidence=0.45,
                 notes="Last-resort CSS fallback generated from the DOM path.",
             )

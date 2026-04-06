@@ -67,6 +67,7 @@ def test_page_state_to_agent_observation_preserves_browser_summary_fields() -> N
     ]
     assert observation.interactive_elements[0].is_clickable is True
     assert observation.form_fields[0].placeholder == "Email address"
+    assert observation.form_fields[0].selector_candidates == []
     assert observation.form_fields[0].required is True
 
 
@@ -97,6 +98,23 @@ def test_engine_builds_stable_snapshot_ids_for_same_element_signature() -> None:
 
     assert first_element.element_id == second_element.element_id
     assert first_field.field_id == second_field.field_id
+
+
+def test_engine_builds_stable_form_field_selectors_from_semantics() -> None:
+    engine = PlaywrightBrowserEngine()
+
+    raw_field = {
+        "label": "Искать блюда",
+        "selector": 'input[id="mat-input-101579"]',
+        "field_type": "text",
+        "attributes": {"id": "mat-input-101579", "type": "text"},
+    }
+
+    field = engine._build_form_field(raw_field)
+
+    assert field.selector.startswith('role=textbox[name=')
+    assert field.selector_candidates[0] == field.selector
+    assert field.selector_candidates[-1] == 'input[id="mat-input-101579"]'
 
 
 def test_engine_retries_transient_observation_errors() -> None:

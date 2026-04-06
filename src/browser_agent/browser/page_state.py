@@ -93,6 +93,7 @@ class FormFieldState(BaseModel):
     label: str | None = None
     name: str | None = None
     selector: str
+    selector_candidates: list[str] = Field(default_factory=list)
     field_type: str | None = None
     placeholder: str | None = None
     required: bool = False
@@ -109,6 +110,7 @@ class FormFieldState(BaseModel):
             label=self.label,
             name=self.name,
             selector=self.selector,
+            selector_candidates=self.selector_candidates,
             field_type=self.field_type,
             placeholder=self.placeholder,
             required=self.required,

@@ -103,6 +103,7 @@ class FormFieldSummary(BaseModel):
     label: str | None = None
     name: str | None = None
     selector: str
+    selector_candidates: list[str] = Field(default_factory=list)
     field_type: str | None = None
     placeholder: str | None = None
     required: bool = False

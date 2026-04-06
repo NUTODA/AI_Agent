@@ -163,12 +163,12 @@ class TestTypeTextSkillContract:
         )
 
         browser.type_text.assert_called_once_with(
-            'input[id="mat-input-0"]',
+            "field_city_search",
             "Санкт",
             clear_first=True,
             submit=False,
         )
-        assert output.target == 'input[id="mat-input-0"]'
+        assert output.target == "field_city_search"
 
     def test_type_text_treats_field_like_element_id_as_field_reference(self) -> None:
         browser = MagicMock()
@@ -204,7 +204,7 @@ class TestTypeTextSkillContract:
         )
 
         browser.type_text.assert_called_once()
-        assert output.target == 'input[id="mat-input-0"]'
+        assert output.target == "field_city_search"
 
 
 class TestScrollViewportSkillContract:

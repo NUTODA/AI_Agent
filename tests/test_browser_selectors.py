@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
-from browser_agent.browser.page_state import ElementRole, InteractiveElementState
+from browser_agent.browser.page_state import (
+    ElementRole,
+    FormFieldState,
+    InteractiveElementState,
+)
 from browser_agent.browser.selectors import (
     SelectorStrategy,
+    build_form_field_selector_candidates,
     build_selector_candidates,
     resolve_target_candidates,
 )
@@ -191,3 +196,36 @@ def test_resolve_target_candidates_preserves_cached_css_fallback_order() -> None
         'text="Result"',
         "div:nth-of-type(1) > div > div > span > a",
     ]
+
+
+def test_build_selector_candidates_skips_volatile_id_attributes() -> None:
+    element = InteractiveElementState(
+        element_id="element_search",
+        name="Search",
+        tag="input",
+        role=ElementRole.INPUT,
+        selector='input[id="mat-input-12345"]',
+        attributes={"id": "mat-input-12345", "name": "q"},
+        input_like=True,
+    )
+
+    candidates = build_selector_candidates(element)
+
+    assert SelectorStrategy.ID not in [c.strategy for c in candidates]
+    assert 'input[name="q"]' in [c.value for c in candidates]
+
+
+def test_build_form_field_selector_candidates_prefer_semantics_over_volatile_id() -> None:
+    field = FormFieldState(
+        field_id="field_search",
+        label="Искать блюда",
+        selector='input[id="mat-input-12345"]',
+        field_type="text",
+        attributes={"id": "mat-input-12345", "type": "text"},
+    )
+
+    candidates = build_form_field_selector_candidates(field)
+
+    assert candidates[0].strategy == SelectorStrategy.ROLE
+    assert candidates[0].value.startswith('role=textbox[name=')
+    assert 'input[id="mat-input-12345"]' in [c.value for c in candidates]

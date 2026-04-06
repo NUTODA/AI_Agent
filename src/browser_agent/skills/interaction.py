@@ -47,7 +47,7 @@ def _resolve_text_target(
                 error_code="field_reference_not_found",
                 data={"field_id": field_id},
             )
-        return field.selector
+        return field.field_id
 
     if element_id and element_id.startswith("field_"):
         field = _find_form_field_by_id(context.session.latest_observation, element_id)
@@ -57,7 +57,7 @@ def _resolve_text_target(
                 error_code="field_reference_not_found",
                 data={"field_id": element_id},
             )
-        return field.selector
+        return field.field_id
 
     return _resolve_target(selector, element_id)
 

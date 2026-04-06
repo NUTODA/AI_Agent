@@ -18,6 +18,7 @@ from browser_agent.browser.page_state import (
     stable_snapshot_id,
 )
 from browser_agent.browser.selectors import (
+    build_form_field_selector_candidates,
     build_selector_candidates,
     resolve_target_candidates,
 )
@@ -85,6 +86,21 @@ PAGE_SNAPSHOT_SCRIPT = """
       Object.entries(value).filter(([, item]) => item !== null && item !== "")
     );
 
+  const hasVolatileId = (value) => {
+    const normalized = normalizeText(value);
+    if (!normalized) {
+      return false;
+    }
+    return [
+      "mat-input-",
+      "mat-mdc-",
+      "cdk-",
+      "headlessui-",
+      "react-select-",
+      "radix-"
+    ].some((prefix) => normalized.startsWith(prefix));
+  };
+
   const cssPath = (element) => {
     if (!element || element.nodeType !== Node.ELEMENT_NODE) {
       return "";
@@ -93,7 +109,7 @@ PAGE_SNAPSHOT_SCRIPT = """
     let current = element;
     while (current && current.nodeType === Node.ELEMENT_NODE && parts.length < 5) {
       const tag = current.tagName.toLowerCase();
-      if (current.id) {
+      if (current.id && !hasVolatileId(current.id)) {
         parts.unshift(`${tag}[id="${current.id.replace(/"/g, '\\"')}"]`);
         break;
       }
@@ -354,6 +370,8 @@ PAGE_SNAPSHOT_SCRIPT = """
         id: normalizeText(element.getAttribute("id")),
         name: normalizeText(element.getAttribute("name")),
         "data-testid": normalizeText(element.getAttribute("data-testid")),
+        "aria-label": normalizeText(element.getAttribute("aria-label")),
+        placeholder: normalizeText(element.getAttribute("placeholder")),
         autocomplete: normalizeText(element.getAttribute("autocomplete")),
         type
       })
@@ -790,6 +808,7 @@ class PlaywrightBrowserEngine:
         self._page: Page | None = None
         self._last_page_state: PageState | None = None
         self._element_cache: dict[str, InteractiveElementState] = {}
+        self._field_cache: dict[str, FormFieldState] = {}
 
     def start(self) -> None:
         """Prepare the Playwright runtime."""
@@ -857,6 +876,7 @@ class PlaywrightBrowserEngine:
         self._page = None
         self._last_page_state = None
         self._element_cache = {}
+        self._field_cache = {}
 
     def new_page(self) -> Page:
         """Create and activate a new browser page."""
@@ -1127,8 +1147,16 @@ class PlaywrightBrowserEngine:
 
         start = perf_counter()
         page = self.get_page()
-        resolution = resolve_target_candidates(target, self._element_cache)
-        if resolution.used_element_reference and not resolution.candidates:
+        field_candidates = (
+            self._resolve_field_candidates(target)
+            if target.startswith("field_")
+            else []
+        )
+        resolution = None if field_candidates else resolve_target_candidates(
+            target,
+            self._element_cache,
+        )
+        if resolution is not None and resolution.used_element_reference and not resolution.candidates:
             return self._result_error(
                 action="type_text",
                 message=f"Element reference `{target}` is no longer available.",
@@ -1138,7 +1166,7 @@ class PlaywrightBrowserEngine:
             )
 
         # If using raw selector (not element_id), check for ambiguity
-        if not resolution.used_element_reference:
+        if resolution is not None and not resolution.used_element_reference:
             is_ambiguous, match_count = self._detect_ambiguous_selector(page, target)
             if is_ambiguous:
                 return self._result_error(
@@ -1154,8 +1182,9 @@ class PlaywrightBrowserEngine:
                     },
                 )
 
+        candidates = field_candidates if field_candidates else resolution.candidates
         errors: list[str] = []
-        for candidate in resolution.candidates:
+        for candidate in candidates:
             try:
                 locator = page.locator(candidate.value).first
                 self._click_locator_resilient(locator)
@@ -1175,7 +1204,10 @@ class PlaywrightBrowserEngine:
                         "target": target,
                         "resolved_selector": candidate.value,
                         "selector_strategy": candidate.strategy.value,
-                        "used_element_reference": resolution.used_element_reference,
+                        "used_element_reference": (
+                            False if field_candidates else resolution.used_element_reference
+                        ),
+                        "used_field_reference": bool(field_candidates),
                         "clear_first": clear_first,
                         "submitted": submit,
                         "characters_entered": len(text),
@@ -1194,8 +1226,11 @@ class PlaywrightBrowserEngine:
             duration_ms=self._elapsed_ms(start),
             metadata={
                 "target": target,
-                "attempted_selectors": [candidate.value for candidate in resolution.candidates],
-                "used_element_reference": resolution.used_element_reference,
+                "attempted_selectors": [candidate.value for candidate in candidates],
+                "used_element_reference": (
+                    False if field_candidates else resolution.used_element_reference
+                ),
+                "used_field_reference": bool(field_candidates),
                 "clear_first": clear_first,
                 "submitted": submit,
                 "characters_entered": len(text),
@@ -1724,6 +1759,9 @@ class PlaywrightBrowserEngine:
             self._build_form_field(item)
             for item in raw_snapshot.get("form_fields", [])
         ]
+        self._field_cache = {
+            field.field_id: field for field in form_fields
+        }
         artifacts = self._maybe_capture_screenshot(reason=reason)
         page_state = PageState(
             url=raw_snapshot.get("url") or page.url,
@@ -1809,7 +1847,7 @@ class PlaywrightBrowserEngine:
             for key in ("id", "name", "data-testid", "autocomplete", "type")
             if attributes.get(key)
         }
-        return FormFieldState(
+        field = FormFieldState(
             field_id=raw.get("field_id")
             or stable_snapshot_id(
                 "field",
@@ -1832,6 +1870,22 @@ class PlaywrightBrowserEngine:
             enabled=bool(raw.get("enabled", True)),
             attributes=attributes,
         )
+        candidates = [
+            candidate.value for candidate in build_form_field_selector_candidates(field)
+        ]
+        primary_selector = candidates[0] if candidates else field.selector
+        return field.model_copy(
+            update={
+                "selector": primary_selector,
+                "selector_candidates": candidates,
+            }
+        )
+
+    def _resolve_field_candidates(self, field_id: str):
+        field = self._field_cache.get(field_id)
+        if field is None:
+            return []
+        return build_form_field_selector_candidates(field)
 
     def _map_role(self, raw_role: str | None) -> ElementRole:
         if raw_role is None:
